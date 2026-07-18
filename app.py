@@ -701,6 +701,11 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         trend_stat_label = st.radio(
             "Prop category", ["All Props", "Points", "Rebounds", "Assists"], horizontal=True
         )
+        odds_source = st.radio(
+            "Sportsbook odds source",
+            ["DraftKings", "FanDuel", "BetOnline"],
+            horizontal=True,
+        )
     with trend2:
         team_options = ["All Teams"] + sorted(
             team for team in logs["team"].dropna().astype(str).unique() if team
@@ -711,11 +716,6 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         side_filter = st.radio("Side", ["Best side", "Over", "Under"], horizontal=True)
 
     prop_template = make_prop_board(logs, [])
-    odds_source = st.radio(
-        "Sportsbook odds source",
-        ["DraftKings", "FanDuel", "BetOnline"],
-        horizontal=True,
-    )
     board = pd.DataFrame()
     selected_sportsbook = odds_source
     api_key = odds_api_key()
