@@ -16,7 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-st.set_page_config(page_title="WNBA Prop Lab", page_icon="🏀", layout="wide")
+st.set_page_config(page_title="WNBA Prop Labs", page_icon="🏀", layout="wide")
 
 STAT_COLUMNS = {
     "Points": "points",
@@ -411,7 +411,7 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
                 url = html.escape(str(row.get("Player Link", "")), quote=True)
                 name = html.escape(str(row.get("Player", "")))
                 raw_sort = str(row.get("Player", ""))
-                value = f'<a class="prop-player-link" href="{url}" target="_parent">{name}</a>'
+                value = f'<a class="prop-player-link" href="{url}" target="_blank" rel="noopener">{name}</a>'
             elif column == "VS":
                 raw_sort = str(row.get("Opponent", ""))
                 value = html.escape(str(row.get("Opponent", "")))
@@ -595,7 +595,7 @@ def render_player_detail_page(
     st.caption("Projection components: " + ", ".join(components) + ". Research only; estimates are not guarantees.")
 
 
-st.title("🏀 WNBA Historical Prop Lab")
+st.title("🏀 WNBA Prop Labs")
 st.caption("Compare a sportsbook prop with a player's historical game logs—no live-statistics subscription required.")
 
 # Internal risk defaults keep EV and staking estimates consistent without a sidebar.
