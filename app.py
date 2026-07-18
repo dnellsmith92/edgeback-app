@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import isfinite
 from statistics import NormalDist
+import html
 import json
 import re
 import unicodedata
@@ -380,6 +381,73 @@ def prop_feed(
     return pd.DataFrame(rows).sort_values([rank_col, "Average"], ascending=False).reset_index(drop=True)
 
 
+def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
+    """Render clickable white player links and neon-green percentage bars."""
+    if ev_only:
+        columns = [
+            "EV+", "Player", "Team", "Prop", "Line", "Pick", "Odds", "VS",
+            "Estimated EV", "Fair Odds", "Average", "L5", "L10", "L20", "H2H",
+        ]
+    else:
+        columns = [
+            "Player", "Team", "Prop", "Line", "Pick", "Odds", "VS",
+            "Average", "L5", "L10", "L20", "H2H",
+        ]
+    percent_columns = {"L5", "L10", "L20", "H2H", "Estimated EV"}
+    header = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
+    body_rows = []
+    for _, row in df.iterrows():
+        cells = []
+        for column in columns:
+            if column == "Player":
+                url = html.escape(str(row.get("Player Link", "")), quote=True)
+                name = html.escape(str(row.get("Player", "")))
+                value = f'<a class="prop-player-link" href="{url}" target="_self">{name}</a>'
+            elif column == "VS":
+                value = html.escape(str(row.get("Opponent", "")))
+            elif column in percent_columns:
+                raw = row.get(column, np.nan)
+                if pd.isna(raw):
+                    value = "—"
+                else:
+                    pct = float(raw) * 100
+                    bar_width = min(max(pct, 0.0), 100.0)
+                    value = (
+                        '<div class="prop-percent">'
+                        f'<div class="prop-bar"><span style="width:{bar_width:.1f}%"></span></div>'
+                        f'<b>{pct:.0f}%</b></div>'
+                    )
+            elif column in {"Line", "Average"}:
+                value = f"{float(row.get(column, 0)):.1f}"
+            else:
+                value = html.escape(str(row.get(column, "")))
+            cells.append(f"<td>{value}</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    st.markdown(
+        """
+        <style>
+        .prop-table-wrap {overflow-x:auto; border:1px solid #343943; border-radius:10px;}
+        .prop-table {width:100%; border-collapse:collapse; white-space:nowrap; font-size:.9rem;}
+        .prop-table th {background:#171a20; color:#d9dee7; text-align:left; padding:10px; position:sticky; top:0;}
+        .prop-table td {padding:9px 10px; border-top:1px solid #30343d; color:#f3f5f7;}
+        .prop-table tr:hover td {background:#20252c;}
+        .prop-player-link, .prop-player-link:visited {color:#ffffff !important; font-weight:700; text-decoration:underline;}
+        .prop-player-link:hover {color:#71ff9a !important;}
+        .prop-percent {display:flex; align-items:center; gap:8px; min-width:110px; color:#71ff9a;}
+        .prop-bar {width:72px; height:8px; overflow:hidden; border-radius:10px; background:#30363d;}
+        .prop-bar span {display:block; height:100%; border-radius:10px; background:#39ff7a; box-shadow:0 0 8px #39ff7a;}
+        </style>
+        """
+        + '<div class="prop-table-wrap"><table class="prop-table"><thead><tr>'
+        + header
+        + "</tr></thead><tbody>"
+        + "".join(body_rows)
+        + "</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_player_detail_page(
     logs: pd.DataFrame,
     bankroll: float,
@@ -676,37 +744,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         st.info("Enter at least one prop line above to generate the all-player hit-rate table.")
     else:
         st.caption("Click a player name to open that player's separate analysis page.")
-        st.dataframe(
-            trend_table,
-            use_container_width=True,
-            hide_index=True,
-            key=f"prop_rankings_{trend_stat_label}_{trend_window}_{side_filter}",
-            column_order=[
-                "Player Link", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
-                "Average", "L5", "L10", "L20", "H2H",
-            ],
-            column_config={
-                "Player Link": st.column_config.LinkColumn(
-                    "Player", display_text=r"#(.*)$", help="Click to open player analysis"
-                ),
-                "Line": st.column_config.NumberColumn(format="%.1f"),
-                "Opponent": st.column_config.TextColumn("VS"),
-                "Average": st.column_config.NumberColumn(format="%.1f"),
-                "L5": st.column_config.ProgressColumn(
-                    format="percent", min_value=0.0, max_value=1.0
-                ),
-                "L10": st.column_config.ProgressColumn(
-                    format="percent", min_value=0.0, max_value=1.0
-                ),
-                "L20": st.column_config.ProgressColumn(
-                    format="percent", min_value=0.0, max_value=1.0
-                ),
-                "H2H": st.column_config.ProgressColumn(
-                    format="percent", min_value=0.0, max_value=1.0,
-                    help="Hit rate in previous games against today's opponent.",
-                ),
-            },
-        )
+        render_prop_table(trend_table)
 
         st.subheader("EV+ Betting Candidates")
         st.caption(
@@ -719,30 +757,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         if ev_table.empty:
             st.info("No displayed props currently have positive estimated value.")
         else:
-            st.dataframe(
-                ev_table,
-                use_container_width=True,
-                hide_index=True,
-                column_order=[
-                    "EV+", "Player Link", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
-                    "Estimated EV", "Fair Odds", "Average", "L5", "L10", "L20", "H2H",
-                ],
-                column_config={
-                    "Player Link": st.column_config.LinkColumn(
-                        "Player", display_text=r"#(.*)$", help="Click to open player analysis"
-                    ),
-                    "Line": st.column_config.NumberColumn(format="%.1f"),
-                    "Opponent": st.column_config.TextColumn("VS"),
-                    "Estimated EV": st.column_config.ProgressColumn(
-                        format="percent", min_value=0.0, max_value=max(.01, float(ev_table["Estimated EV"].max()))
-                    ),
-                    "Average": st.column_config.NumberColumn(format="%.1f"),
-                    "L5": st.column_config.NumberColumn(format="percent"),
-                    "L10": st.column_config.NumberColumn(format="percent"),
-                    "L20": st.column_config.NumberColumn(format="percent"),
-                    "H2H": st.column_config.NumberColumn(format="percent"),
-                },
-            )
+            render_prop_table(ev_table, ev_only=True)
         st.download_button(
             "Download trend results",
             trend_table.to_csv(index=False),
