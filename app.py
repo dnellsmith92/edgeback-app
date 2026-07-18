@@ -39,6 +39,7 @@ DK_MARKETS = {
     "Rebounds": "player_rebounds",
     "Assists": "player_assists",
 }
+DK_MARKET_LABELS = {value: key for key, value in DK_MARKETS.items()}
 
 
 def normalize_player_name(value: object) -> str:
@@ -58,14 +59,15 @@ def get_json(url: str, params: dict[str, str]) -> object:
         return json.loads(response.read().decode("utf-8"))
 
 
-def parse_draftkings_props(payload: dict, market_key: str) -> list[dict]:
-    rows: dict[tuple[str, str, float], dict] = {}
+def parse_draftkings_props(payload: dict, market_keys: set[str]) -> list[dict]:
+    rows: dict[tuple[str, str, str, float], dict] = {}
     game = f"{payload.get('away_team', '')} @ {payload.get('home_team', '')}".strip(" @")
     for bookmaker in payload.get("bookmakers", []):
         if bookmaker.get("key") != "draftkings":
             continue
         for market in bookmaker.get("markets", []):
-            if market.get("key") != market_key:
+            market_key = market.get("key")
+            if market_key not in market_keys:
                 continue
             for outcome in market.get("outcomes", []):
                 player = str(outcome.get("description", "")).strip()
@@ -73,9 +75,10 @@ def parse_draftkings_props(payload: dict, market_key: str) -> list[dict]:
                 side = str(outcome.get("name", "")).title()
                 if not player or point is None or side not in {"Over", "Under"}:
                     continue
-                key = (str(payload.get("id", "")), player, float(point))
+                key = (str(payload.get("id", "")), str(market_key), player, float(point))
                 row = rows.setdefault(key, {
-                    "Player": player, "Line": float(point), "Over Odds": np.nan,
+                    "Player": player, "Prop": DK_MARKET_LABELS.get(str(market_key), str(market_key)),
+                    "Line": float(point), "Over Odds": np.nan,
                     "Under Odds": np.nan, "Game": game,
                     "Start Time": payload.get("commence_time", ""),
                     "Last Update": market.get("last_update", bookmaker.get("last_update", "")),
@@ -85,7 +88,8 @@ def parse_draftkings_props(payload: dict, market_key: str) -> list[dict]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_draftkings_props(api_key: str, market_key: str) -> pd.DataFrame:
+def fetch_draftkings_props(api_key: str, market_keys_csv: str) -> pd.DataFrame:
+    market_keys = set(market_keys_csv.split(","))
     events = get_json(
         f"{ODDS_API_BASE}/sports/basketball_wnba/events",
         {"apiKey": api_key},
@@ -97,11 +101,11 @@ def fetch_draftkings_props(api_key: str, market_key: str) -> pd.DataFrame:
             {
                 "apiKey": api_key,
                 "bookmakers": "draftkings",
-                "markets": market_key,
+                "markets": market_keys_csv,
                 "oddsFormat": "american",
             },
         )
-        rows.extend(parse_draftkings_props(payload, market_key))
+        rows.extend(parse_draftkings_props(payload, market_keys))
     return pd.DataFrame(rows)
 
 
@@ -294,6 +298,49 @@ def all_player_trends(
     return pd.DataFrame(rows).sort_values(["Over Hit Rate", "Average"], ascending=False)
 
 
+def prop_feed(
+    logs: pd.DataFrame,
+    prop_board: pd.DataFrame,
+    fallback_prop: str,
+    rank_window: int,
+    side_filter: str,
+) -> pd.DataFrame:
+    """Build an app-style feed with L5/L10/L20 rates and one selectable pick per prop."""
+    rows = []
+    for _, prop in prop_board.iterrows():
+        prop_label = str(prop.get("Prop", fallback_prop))
+        if prop_label not in STAT_COLUMNS or pd.isna(prop.get("Line")):
+            continue
+        games = logs[logs["player"] == prop["Player"]].sort_values("game_date")
+        if games.empty:
+            continue
+        values = games[STAT_COLUMNS[prop_label]]
+        line = float(prop["Line"])
+        rates = {}
+        for window in (5, 10, 20):
+            recent = values.tail(window)
+            rates[("Over", window)] = hit_rate(recent, line, "Over")
+            rates[("Under", window)] = hit_rate(recent, line, "Under")
+        if side_filter == "Best side":
+            side = "Over" if rates[("Over", rank_window)] >= rates[("Under", rank_window)] else "Under"
+        else:
+            side = side_filter
+        odds = int(prop.get(f"{side} Odds", -110))
+        rows.append({
+            "Player": prop["Player"], "Team": prop.get("Team", ""), "Prop": prop_label,
+            "Pick": f"{side} {line:g}", "Odds": odds, "Line": line,
+            "Over Odds": int(prop.get("Over Odds", -110)),
+            "Under Odds": int(prop.get("Under Odds", -110)),
+            "L5": rates[(side, 5)], "L10": rates[(side, 10)], "L20": rates[(side, 20)],
+            "Average": float(values.tail(rank_window).mean()),
+            "Game": prop.get("Game", ""), "Start Time": prop.get("Start Time", ""),
+        })
+    if not rows:
+        return pd.DataFrame()
+    rank_col = f"L{rank_window}"
+    return pd.DataFrame(rows).sort_values([rank_col, "Average"], ascending=False).reset_index(drop=True)
+
+
 st.title("🏀 WNBA Historical Prop Lab")
 st.caption("Compare a sportsbook prop with a player's historical game logs—no live-statistics subscription required.")
 
@@ -353,12 +400,16 @@ except Exception as exc:
     st.stop()
 
 with st.expander("📊 All-Player Prop Trends", expanded=True):
-    st.caption("See every player with a posted DraftKings prop, ranked by Last 5 or Last 10 hit rate.")
-    trend1, trend2 = st.columns(2)
+    st.caption("Filter the DraftKings prop feed, compare L5/L10/L20 hit rates, and click a player for full details.")
+    trend1, trend2, trend3 = st.columns(3)
     with trend1:
-        trend_stat_label = st.radio("Statistic", ["Points", "Rebounds", "Assists"], horizontal=True)
+        trend_stat_label = st.radio(
+            "Prop category", ["All Props", "Points", "Rebounds", "Assists"], horizontal=True
+        )
     with trend2:
-        trend_window_label = st.radio("Trend window", ["Last 5", "Last 10"], horizontal=True)
+        trend_window_label = st.radio("Rank by", ["Last 5", "Last 10", "Last 20"], horizontal=True)
+    with trend3:
+        side_filter = st.radio("Side", ["Best side", "Over", "Under"], horizontal=True)
 
     prop_template = make_prop_board(logs, [])
     odds_source = st.radio(
@@ -382,7 +433,12 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         else:
             try:
                 with st.spinner("Loading current DraftKings player props…"):
-                    board = fetch_draftkings_props(api_key, DK_MARKETS[trend_stat_label])
+                    requested_markets = (
+                        ",".join(DK_MARKETS.values())
+                        if trend_stat_label == "All Props"
+                        else DK_MARKETS[trend_stat_label]
+                    )
+                    board = fetch_draftkings_props(api_key, requested_markets)
                 if board.empty:
                     st.info("DraftKings has no WNBA props posted for this market right now. Try again closer to game time.")
                 else:
@@ -395,9 +451,10 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                     )
                     board["Team"] = board["Player"].map(team_lookup).fillna("")
                     board = board.dropna(subset=["Over Odds", "Under Odds"])
-                    st.success(f"Loaded {len(board)} current DraftKings {trend_stat_label.lower()} props. Odds refresh every 15 minutes.")
+                    category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
+                    st.success(f"Loaded {len(board)} current DraftKings {category_text} props. Odds refresh every 15 minutes.")
                     st.dataframe(
-                        board[["Player", "Team", "Game", "Start Time", "Line", "Over Odds", "Under Odds"]],
+                        board[["Player", "Team", "Prop", "Game", "Start Time", "Line", "Over Odds", "Under Odds"]],
                         use_container_width=True,
                         hide_index=True,
                     )
@@ -450,26 +507,54 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
     if board.empty:
         board = prop_template.iloc[0:0]
 
-    trend_stat = STAT_COLUMNS[trend_stat_label]
-    trend_window = 5 if trend_window_label == "Last 5" else 10
-    trend_table = all_player_trends(logs, board, trend_stat, trend_window)
+    fallback_prop = "Points" if trend_stat_label == "All Props" else trend_stat_label
+    trend_stat = STAT_COLUMNS[fallback_prop]
+    trend_window = int(trend_window_label.split()[-1])
+    trend_table = prop_feed(logs, board, fallback_prop, trend_window, side_filter)
     if trend_table.empty:
         st.info("Enter at least one prop line above to generate the all-player hit-rate table.")
     else:
-        display_side = st.radio("Rank by", ["Over Hit Rate", "Under Hit Rate"], horizontal=True)
-        trend_table = trend_table.sort_values(
-            [display_side, "Games", "Average"],
-            ascending=[False, False, False],
-        ).reset_index(drop=True)
         trend_table.insert(0, "Rank", np.arange(1, len(trend_table) + 1))
-        st.dataframe(
-            trend_table.style.format({
-                "Line": "{:.1f}", "Average": "{:.1f}",
-                "Over Hit Rate": "{:.0%}", "Under Hit Rate": "{:.0%}",
-            }).background_gradient(subset=[display_side], cmap="RdYlGn"),
+        st.caption("Click any player row to open that player in the Individual Player Analyzer below.")
+        ranking_event = st.dataframe(
+            trend_table,
             use_container_width=True,
             hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"prop_rankings_{trend_stat_label}_{trend_window}_{side_filter}",
+            column_order=[
+                "Rank", "Player", "Team", "Prop", "Pick", "Odds", "Game",
+                "Start Time", "L5", "L10", "L20", "Average",
+            ],
+            column_config={
+                "Rank": st.column_config.NumberColumn(format="%d"),
+                "Line": st.column_config.NumberColumn(format="%.1f"),
+                "Average": st.column_config.NumberColumn(format="%.1f"),
+                "L5": st.column_config.ProgressColumn(
+                    format="percent", min_value=0.0, max_value=1.0
+                ),
+                "L10": st.column_config.ProgressColumn(
+                    format="percent", min_value=0.0, max_value=1.0
+                ),
+                "L20": st.column_config.ProgressColumn(
+                    format="percent", min_value=0.0, max_value=1.0
+                ),
+            },
         )
+        if ranking_event.selection.rows:
+            selected_prop = trend_table.iloc[ranking_event.selection.rows[0]]
+            selection_token = (
+                selected_prop["Player"], selected_prop["Prop"], float(selected_prop["Line"]),
+                int(selected_prop["Over Odds"]), int(selected_prop["Under Odds"]),
+            )
+            if st.session_state.get("prop_selection_token") != selection_token:
+                st.session_state["prop_selection_token"] = selection_token
+                st.session_state["individual_player_select"] = selected_prop["Player"]
+                st.session_state["individual_market_select"] = selected_prop["Prop"]
+                st.session_state["individual_line"] = float(selected_prop["Line"])
+                st.session_state["individual_over_odds"] = int(selected_prop["Over Odds"])
+                st.session_state["individual_under_odds"] = int(selected_prop["Under Odds"])
         st.download_button(
             "Download trend results",
             trend_table.to_csv(index=False),
@@ -477,19 +562,27 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             "text/csv",
         )
 
+st.divider()
+st.header("🔎 Individual Player Analyzer")
+st.caption(
+    "Select one player to view their sportsbook line and odds, projection, expected value, "
+    "Last 5 and Last 10 averages, historical splits, chart, and recent game logs."
+)
 players = sorted(logs.player.astype(str).unique())
-player = st.selectbox("Player", players)
+if st.session_state.get("individual_player_select") not in players:
+    st.session_state["individual_player_select"] = players[0]
+player = st.selectbox("Player", players, key="individual_player_select")
 player_games = logs[logs.player.astype(str) == player].sort_values("game_date").copy()
 
 setup1, setup2, setup3, setup4 = st.columns(4)
 with setup1:
-    market_label = st.selectbox("Prop", list(STAT_COLUMNS))
+    market_label = st.selectbox("Prop", list(STAT_COLUMNS), key="individual_market_select")
 with setup2:
-    line = st.number_input("Sportsbook line", min_value=0.0, value=19.5, step=.5)
+    line = st.number_input("Sportsbook line", min_value=0.0, value=19.5, step=.5, key="individual_line")
 with setup3:
-    over_odds = st.number_input("Over odds (American)", value=-110, step=5)
+    over_odds = st.number_input("Over odds (American)", value=-110, step=5, key="individual_over_odds")
 with setup4:
-    under_odds = st.number_input("Under odds (American)", value=-110, step=5)
+    under_odds = st.number_input("Under odds (American)", value=-110, step=5, key="individual_under_odds")
 
 context1, context2 = st.columns(2)
 with context1:
@@ -497,6 +590,13 @@ with context1:
 with context2:
     opponent_options = sorted(player_games.opponent.astype(str).unique())
     opponent = st.selectbox("Upcoming opponent", opponent_options)
+
+detail_window_label = st.radio(
+    "Player view",
+    ["Last 5", "Last 10", "Last 20", "Season", "Head-to-head"],
+    horizontal=True,
+    help="Head-to-head uses this player's previous games against the selected opponent.",
+)
 
 stat = STAT_COLUMNS[market_label]
 values = player_games[stat]
@@ -517,7 +617,27 @@ best_decimal = over_decimal if best_side == "Over" else under_decimal
 stake_fraction = min(kelly_fraction(best_prob, best_decimal) * kelly_multiplier, max_stake_pct)
 stake = bankroll * stake_fraction if best_ev >= min_ev else 0.0
 
-st.subheader(f"{player} — {market_label} {line:g}")
+if detail_window_label == "Season":
+    detail_games = player_games
+elif detail_window_label == "Head-to-head":
+    detail_games = player_games[player_games.opponent == opponent]
+else:
+    detail_games = player_games.tail(int(detail_window_label.split()[-1]))
+detail_values = detail_games[stat]
+latest_team = str(player_games.iloc[-1]["team"])
+
+st.subheader(f"{player} ({latest_team})")
+st.caption(f"{market_label} player prop • selected matchup: {latest_team} vs {opponent}")
+price1, price2, price3, price4 = st.columns(4)
+price1.metric("DraftKings line", f"{line:g}")
+price2.metric("Over price", f"{int(over_odds):+d}")
+price3.metric("Under price", f"{int(under_odds):+d}")
+price4.metric(
+    f"{detail_window_label} over hit rate",
+    "N/A" if detail_values.empty else f"{hit_rate(detail_values, line, 'Over'):.0%}",
+)
+
+st.subheader("Projection and form")
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Projection", f"{projection:.1f}")
 m2.metric("Last 5 average", f"{values.tail(5).mean():.1f}")
@@ -558,7 +678,8 @@ splits = pd.DataFrame(split_rows)
 chart_col, split_col = st.columns([3, 2])
 with chart_col:
     st.subheader("Game-log trend")
-    chart = player_games.set_index("game_date")[[stat]].tail(20).rename(columns={stat: market_label})
+    chart_source = detail_games if not detail_games.empty else player_games.tail(20)
+    chart = chart_source.set_index("game_date")[[stat]].rename(columns={stat: market_label})
     chart["Prop line"] = line
     st.line_chart(chart)
 with split_col:
