@@ -692,7 +692,10 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             "Prop category", ["All Props", "Points", "Rebounds", "Assists"], horizontal=True
         )
     with trend2:
-        trend_window_label = st.radio("Rank by", ["Last 5", "Last 10", "Last 20"], horizontal=True)
+        team_options = ["All Teams"] + sorted(
+            team for team in logs["team"].dropna().astype(str).unique() if team
+        )
+        selected_team = st.selectbox("Team", team_options)
     with trend3:
         side_filter = st.radio("Side", ["Best side", "Over", "Under"], horizontal=True)
 
@@ -796,10 +799,12 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
 
     if board.empty:
         board = prop_template.iloc[0:0]
+    elif selected_team != "All Teams":
+        board = board[board["Team"].astype(str) == selected_team].copy()
 
     fallback_prop = "Points" if trend_stat_label == "All Props" else trend_stat_label
     trend_stat = STAT_COLUMNS[fallback_prop]
-    trend_window = int(trend_window_label.split()[-1])
+    trend_window = 5
     trend_table = prop_feed(logs, board, fallback_prop, trend_window, side_filter)
     if trend_table.empty:
         st.info("Enter at least one prop line above to generate the all-player hit-rate table.")
