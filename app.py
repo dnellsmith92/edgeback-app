@@ -72,6 +72,16 @@ WNBA_TEAM_ALIASES = {
     "NY": "NYL", "GS": "GSV", "LV": "LVA", "LA": "LAS", "WSH": "WAS",
     "PHO": "PHX",
 }
+WNBA_TEAM_NAMES_BY_CODE = {
+    abbreviation: name for name, abbreviation in WNBA_TEAM_ABBREVIATIONS.items()
+}
+
+
+def full_team_name(team: object) -> str:
+    """Return the full WNBA team name without changing the stored filter value."""
+    code = str(team)
+    normalized_code = WNBA_TEAM_ALIASES.get(code, code)
+    return WNBA_TEAM_NAMES_BY_CODE.get(normalized_code, code)
 
 
 def normalize_player_name(value: object) -> str:
@@ -429,7 +439,7 @@ def prop_feed(
             recent = values.tail(window)
             rates[("Over", window)] = hit_rate(recent, line, "Over")
             rates[("Under", window)] = hit_rate(recent, line, "Under")
-        if side_filter == "Best side":
+        if side_filter == "Over/Under":
             side = "Over" if rates[("Over", rank_window)] >= rates[("Under", rank_window)] else "Under"
         else:
             side = side_filter
@@ -905,10 +915,14 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         team_options = ["All Teams"] + sorted(
             team for team in logs["team"].dropna().astype(str).unique() if team
         )
-        selected_team = st.selectbox("Team", team_options)
+        selected_team = st.selectbox(
+            "Team",
+            team_options,
+            format_func=lambda team: team if team == "All Teams" else full_team_name(team),
+        )
         game_filter_slot = st.empty()
     with trend3:
-        side_filter = st.selectbox("Side", ["Best side", "Over", "Under"])
+        side_filter = st.selectbox("Over/Under", ["Over/Under", "Over", "Under"])
 
     prop_template = make_prop_board(logs, [])
     board = pd.DataFrame()
