@@ -43,6 +43,11 @@ DK_MARKETS = {
     "Assists": "player_assists",
 }
 DK_MARKET_LABELS = {value: key for key, value in DK_MARKETS.items()}
+SPORTSBOOKS = {
+    "DraftKings": "draftkings",
+    "FanDuel": "fanduel",
+    "BetOnline": "betonlineag",
+}
 WNBA_TEAM_ABBREVIATIONS = {
     "Atlanta Dream": "ATL", "Chicago Sky": "CHI", "Connecticut Sun": "CON",
     "Dallas Wings": "DAL", "Golden State Valkyries": "GSV", "Indiana Fever": "IND",
@@ -79,11 +84,15 @@ def get_json(url: str, params: dict[str, str]) -> object:
         return json.loads(response.read().decode("utf-8"))
 
 
-def parse_draftkings_props(payload: dict, market_keys: set[str]) -> list[dict]:
+def parse_sportsbook_props(
+    payload: dict,
+    market_keys: set[str],
+    bookmaker_key: str,
+) -> list[dict]:
     rows: dict[tuple[str, str, str, float], dict] = {}
     game = f"{payload.get('away_team', '')} @ {payload.get('home_team', '')}".strip(" @")
     for bookmaker in payload.get("bookmakers", []):
-        if bookmaker.get("key") != "draftkings":
+        if bookmaker.get("key") != bookmaker_key:
             continue
         for market in bookmaker.get("markets", []):
             market_key = market.get("key")
@@ -108,7 +117,11 @@ def parse_draftkings_props(payload: dict, market_keys: set[str]) -> list[dict]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_draftkings_props(api_key: str, market_keys_csv: str) -> pd.DataFrame:
+def fetch_sportsbook_props(
+    api_key: str,
+    market_keys_csv: str,
+    bookmaker_key: str,
+) -> pd.DataFrame:
     market_keys = set(market_keys_csv.split(","))
     events = get_json(
         f"{ODDS_API_BASE}/sports/basketball_wnba/events",
@@ -120,12 +133,12 @@ def fetch_draftkings_props(api_key: str, market_keys_csv: str) -> pd.DataFrame:
             f"{ODDS_API_BASE}/sports/basketball_wnba/events/{event['id']}/odds",
             {
                 "apiKey": api_key,
-                "bookmakers": "draftkings",
+                "bookmakers": bookmaker_key,
                 "markets": market_keys_csv,
                 "oddsFormat": "american",
             },
         )
-        rows.extend(parse_draftkings_props(payload, market_keys))
+        rows.extend(parse_sportsbook_props(payload, market_keys, bookmaker_key))
     return pd.DataFrame(rows)
 
 
@@ -361,7 +374,7 @@ def prop_feed(
         player_link = APP_URL + "?" + urlencode({
             "player": str(prop["Player"]), "prop": prop_label, "line": line,
             "over": int(prop.get("Over Odds", -110)), "under": int(prop.get("Under Odds", -110)),
-            "opponent": opponent,
+            "opponent": opponent, "sportsbook": str(prop.get("Sportsbook", "DraftKings")),
         }) + f"#{prop['Player']}"
         rows.append({
             "Player": prop["Player"], "Team": prop.get("Team", ""), "Prop": prop_label,
@@ -515,7 +528,8 @@ def render_player_detail_page(
     with c1:
         prop_label = st.selectbox("Prop", prop_options, index=prop_options.index(selected_prop), key="page_prop")
     with c2:
-        line = st.number_input("DraftKings line", min_value=0.0, value=float(st.session_state.get("individual_line", 19.5)), step=.5, key="page_line")
+        sportsbook = str(st.session_state.get("selected_sportsbook", "DraftKings"))
+        line = st.number_input(f"{sportsbook} line", min_value=0.0, value=float(st.session_state.get("individual_line", 19.5)), step=.5, key="page_line")
     with c3:
         over_odds = st.number_input("Over odds", value=int(st.session_state.get("individual_over_odds", -110)), step=5, key="page_over")
     with c4:
@@ -663,6 +677,7 @@ if linked_player:
     except (TypeError, ValueError):
         pass
     st.session_state["selected_opponent"] = st.query_params.get("opponent", "")
+    st.session_state["selected_sportsbook"] = st.query_params.get("sportsbook", "DraftKings")
     st.session_state["app_view"] = "player"
 
 if st.session_state.get("app_view") == "player":
@@ -670,7 +685,7 @@ if st.session_state.get("app_view") == "player":
     st.stop()
 
 with st.expander("📊 All-Player Prop Trends", expanded=True):
-    st.caption("Filter the DraftKings prop feed, compare L5/L10/L20 hit rates, and click a player for full details.")
+    st.caption("Filter the sportsbook prop feed, compare L5/L10/L20 hit rates, and click a player for full details.")
     trend1, trend2, trend3 = st.columns(3)
     with trend1:
         trend_stat_label = st.radio(
@@ -684,14 +699,15 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
     prop_template = make_prop_board(logs, [])
     odds_source = st.radio(
         "Sportsbook odds source",
-        ["DraftKings automatic", "Enter or upload manually"],
+        ["DraftKings", "FanDuel", "BetOnline", "Enter or upload manually"],
         horizontal=True,
     )
     board = pd.DataFrame()
-    if odds_source == "DraftKings automatic":
+    selected_sportsbook = odds_source if odds_source in SPORTSBOOKS else "Manual"
+    if odds_source in SPORTSBOOKS:
         api_key = odds_api_key()
         if not api_key:
-            st.warning("DraftKings automatic odds need a private Odds API key. Add it in Manage app → Settings → Secrets.")
+            st.warning("Sportsbook odds need a private Odds API key. Add it in Manage app → Settings → Secrets.")
             with st.expander("One-time API-key setup"):
                 st.markdown(
                     "1. Create a key at [The Odds API](https://the-odds-api.com/).\n"
@@ -702,15 +718,19 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 st.code('THE_ODDS_API_KEY = "paste-your-key-here"')
         else:
             try:
-                with st.spinner("Loading current DraftKings player props…"):
+                with st.spinner(f"Loading current {odds_source} player props…"):
                     requested_markets = (
                         ",".join(DK_MARKETS.values())
                         if trend_stat_label == "All Props"
                         else DK_MARKETS[trend_stat_label]
                     )
-                    board = fetch_draftkings_props(api_key, requested_markets)
+                    board = fetch_sportsbook_props(
+                        api_key,
+                        requested_markets,
+                        SPORTSBOOKS[odds_source],
+                    )
                 if board.empty:
-                    st.info("DraftKings has no WNBA props posted for this market right now. Try again closer to game time.")
+                    st.info(f"{odds_source} has no WNBA props posted for this market right now. Try again closer to game time.")
                 else:
                     latest_players = logs.sort_values("game_date").groupby("player", as_index=False).tail(1)
                     name_lookup = dict(zip(latest_players["player"].map(normalize_player_name), latest_players["player"]))
@@ -720,14 +740,15 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                         lambda value: name_lookup.get(normalize_player_name(value), value)
                     )
                     board["Team"] = board["Player"].map(team_lookup).fillna("")
+                    board["Sportsbook"] = odds_source
                     board["Opponent"] = board.apply(
                         lambda row: matchup_opponent(row.get("Game", ""), row.get("Team", "")), axis=1
                     )
                     board = board.dropna(subset=["Over Odds", "Under Odds"])
                     category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
-                    st.success(f"Loaded {len(board)} current DraftKings {category_text} props. Odds refresh every 15 minutes.")
+                    st.success(f"Loaded {len(board)} current {odds_source} {category_text} props. Odds refresh every 15 minutes.")
             except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
-                st.error(f"Could not load DraftKings odds: {exc}")
+                st.error(f"Could not load {odds_source} odds: {exc}")
                 st.info("Check the API key and account quota, or use manual entry below.")
     else:
         upload_board = st.file_uploader(
@@ -752,6 +773,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                     raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
                 if "Team" not in board:
                     board["Team"] = ""
+                board["Sportsbook"] = "Manual"
             except Exception as exc:
                 st.error(f"Could not load prop board: {exc}")
                 board = prop_template
@@ -787,7 +809,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
 
         st.subheader("EV+ Betting Candidates")
         st.caption(
-            "Estimated from the historical projection and current DraftKings price. "
+            f"Estimated from the historical projection and current {selected_sportsbook} price. "
             "EV+ is a research signal, not a guarantee of profit."
         )
         ev_table = trend_table[trend_table["Estimated EV"] > 0].sort_values(
