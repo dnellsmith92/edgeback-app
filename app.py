@@ -108,7 +108,12 @@ def viewer_timezone() -> ZoneInfo:
 
 def matchup_datetime_label(game: object, start_time: object, timezone: ZoneInfo) -> str:
     """Format an Odds API matchup and UTC start time in the viewer's timezone."""
-    label = matchup_label(game)
+    teams = [
+        WNBA_TEAM_ABBREVIATIONS.get(name.strip(), name.strip())
+        for name in str(game).split(" @ ")
+        if name.strip()
+    ]
+    label = " @ ".join(teams) if len(teams) == 2 else str(game)
     timestamp = pd.to_datetime(start_time, errors="coerce", utc=True)
     if pd.isna(timestamp):
         return label
