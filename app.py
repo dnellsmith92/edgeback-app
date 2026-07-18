@@ -673,8 +673,16 @@ def render_player_detail_page(
             "Venue": "Home" if game["home_away"] == "H" else "Away",
             prop_label: actual,
             "Pick": f"{trend_side} {line:g}",
+            "Player Minutes": float(game["minutes"]),
         })
-    st.dataframe(pd.DataFrame(result_rows), hide_index=True, use_container_width=True)
+    st.dataframe(
+        pd.DataFrame(result_rows),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Player Minutes": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
 
     split_rows = []
     for label, subset in [
