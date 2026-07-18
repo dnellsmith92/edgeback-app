@@ -5,10 +5,31 @@ import io
 import pandas as pd
 import streamlit as st
 
-from edgeback.backtest import BacktestConfig, run_backtest
-from edgeback.io import load_betting_data
+from backtest import BacktestConfig, run_backtest
+from odds import add_market_probabilities, to_decimal
 
 
+def load_betting_data(file, odds_format="decimal"):
+    df = pd.read_csv(file)
+
+    required = {
+        "event_id",
+        "event_time",
+        "settled_time",
+        "sportsbook",
+        "market",
+        "selection",
+        "odds",
+        "won",
+    }
+
+    missing = required - set(df.columns)
+
+    if missing:
+        raise ValueError(f"Missing columns: {sorted(missing)}")
+
+    df["decimal_odds"] = to_decimal(df["odds"], odds_format)
+    return add_market_probabilities(df)
 st.set_page_config(page_title="EdgeBack", page_icon="📈", layout="wide")
 st.title("EdgeBack Sports Betting Analyzer")
 st.caption("Upload historical pregame odds and results to run a leakage-safe walk-forward backtest.")
