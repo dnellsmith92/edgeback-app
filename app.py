@@ -444,7 +444,11 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
                 url = html.escape(str(row.get("Player Link", "")), quote=True)
                 name = html.escape(str(row.get("Player", "")))
                 raw_sort = str(row.get("Player", ""))
-                value = f'<a class="prop-player-link" href="{url}" target="_top">{name}</a>'
+                value = (
+                    f'<a class="prop-player-link" href="{url}" target="_top" '
+                    'onclick="window.top.location.href=this.href; return false;">'
+                    f'{name}</a>'
+                )
             elif column == "VS":
                 raw_sort = str(row.get("Opponent", ""))
                 value = html.escape(str(row.get("Opponent", "")))
