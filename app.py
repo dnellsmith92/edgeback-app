@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from math import isfinite
 from statistics import NormalDist
+import json
+import re
+import unicodedata
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
@@ -27,6 +33,76 @@ BASE_REQUIRED = {
     "game_date", "player", "team", "opponent", "home_away", "minutes",
     "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers",
 }
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+DK_MARKETS = {
+    "Points": "player_points",
+    "Rebounds": "player_rebounds",
+    "Assists": "player_assists",
+}
+
+
+def normalize_player_name(value: object) -> str:
+    text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def odds_api_key() -> str:
+    try:
+        return str(st.secrets.get("THE_ODDS_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def get_json(url: str, params: dict[str, str]) -> object:
+    with urlopen(f"{url}?{urlencode(params)}", timeout=25) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def parse_draftkings_props(payload: dict, market_key: str) -> list[dict]:
+    rows: dict[tuple[str, str, float], dict] = {}
+    game = f"{payload.get('away_team', '')} @ {payload.get('home_team', '')}".strip(" @")
+    for bookmaker in payload.get("bookmakers", []):
+        if bookmaker.get("key") != "draftkings":
+            continue
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != market_key:
+                continue
+            for outcome in market.get("outcomes", []):
+                player = str(outcome.get("description", "")).strip()
+                point = outcome.get("point")
+                side = str(outcome.get("name", "")).title()
+                if not player or point is None or side not in {"Over", "Under"}:
+                    continue
+                key = (str(payload.get("id", "")), player, float(point))
+                row = rows.setdefault(key, {
+                    "Player": player, "Line": float(point), "Over Odds": np.nan,
+                    "Under Odds": np.nan, "Game": game,
+                    "Start Time": payload.get("commence_time", ""),
+                    "Last Update": market.get("last_update", bookmaker.get("last_update", "")),
+                })
+                row[f"{side} Odds"] = outcome.get("price", np.nan)
+    return list(rows.values())
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_draftkings_props(api_key: str, market_key: str) -> pd.DataFrame:
+    events = get_json(
+        f"{ODDS_API_BASE}/sports/basketball_wnba/events",
+        {"apiKey": api_key},
+    )
+    rows: list[dict] = []
+    for event in events:
+        payload = get_json(
+            f"{ODDS_API_BASE}/sports/basketball_wnba/events/{event['id']}/odds",
+            {
+                "apiKey": api_key,
+                "bookmakers": "draftkings",
+                "markets": market_key,
+                "oddsFormat": "american",
+            },
+        )
+        rows.extend(parse_draftkings_props(payload, market_key))
+    return pd.DataFrame(rows)
 
 
 def american_to_decimal(odds: int) -> float:
@@ -169,6 +245,55 @@ def kelly_fraction(probability: float, decimal_odds: float) -> float:
     return max(0.0, (probability * decimal_odds - 1) / b)
 
 
+def make_prop_board(logs: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+    eligible = logs[logs["team"].isin(teams)] if teams else logs
+    latest = eligible.sort_values("game_date").groupby("player", as_index=False).tail(1)
+    return latest[["player", "team"]].sort_values(["team", "player"]).assign(
+        line=np.nan,
+        over_odds=-110,
+        under_odds=-110,
+    ).rename(columns={
+        "player": "Player", "team": "Team", "line": "Line",
+        "over_odds": "Over Odds", "under_odds": "Under Odds",
+    })
+
+
+def all_player_trends(
+    logs: pd.DataFrame,
+    prop_board: pd.DataFrame,
+    stat: str,
+    window: int,
+) -> pd.DataFrame:
+    rows = []
+    for _, prop in prop_board.iterrows():
+        if pd.isna(prop.get("Line")):
+            continue
+        player_games = logs[logs["player"] == prop["Player"]].sort_values("game_date").tail(window)
+        if player_games.empty:
+            continue
+        line = float(prop["Line"])
+        values = player_games[stat]
+        over_hits = values > line
+        under_hits = values < line
+        pushes = values == line
+        sequence = " ".join(
+            "O" if value > line else "U" if value < line else "P"
+            for value in values.tolist()
+        )
+        rows.append({
+            "Player": prop["Player"], "Team": prop.get("Team", ""), "Line": line,
+            "Over Odds": int(prop.get("Over Odds", -110)), "Under Odds": int(prop.get("Under Odds", -110)),
+            "Game": prop.get("Game", ""), "Start Time": prop.get("Start Time", ""),
+            "Games": len(values), "Average": float(values.mean()),
+            "Over Hit Rate": float(over_hits.mean()), "Under Hit Rate": float(under_hits.mean()),
+            "Overs": int(over_hits.sum()), "Unders": int(under_hits.sum()), "Pushes": int(pushes.sum()),
+            "Oldest → Newest": sequence,
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["Over Hit Rate", "Average"], ascending=False)
+
+
 st.title("🏀 WNBA Historical Prop Lab")
 st.caption("Compare a sportsbook prop with a player's historical game logs—no live-statistics subscription required.")
 
@@ -226,6 +351,131 @@ except Exception as exc:
     if source == "Automatic WNBA history":
         st.info("Try again shortly or choose 'Upload my CSV' as a fallback.")
     st.stop()
+
+with st.expander("📊 All-Player Prop Trends", expanded=True):
+    st.caption("See every player with a posted DraftKings prop, ranked by Last 5 or Last 10 hit rate.")
+    trend1, trend2 = st.columns(2)
+    with trend1:
+        trend_stat_label = st.radio("Statistic", ["Points", "Rebounds", "Assists"], horizontal=True)
+    with trend2:
+        trend_window_label = st.radio("Trend window", ["Last 5", "Last 10"], horizontal=True)
+
+    prop_template = make_prop_board(logs, [])
+    odds_source = st.radio(
+        "Sportsbook odds source",
+        ["DraftKings automatic", "Enter or upload manually"],
+        horizontal=True,
+    )
+    board = pd.DataFrame()
+    if odds_source == "DraftKings automatic":
+        api_key = odds_api_key()
+        if not api_key:
+            st.warning("DraftKings automatic odds need a private Odds API key. Add it in Manage app → Settings → Secrets.")
+            with st.expander("One-time API-key setup"):
+                st.markdown(
+                    "1. Create a key at [The Odds API](https://the-odds-api.com/).\n"
+                    "2. Open **Manage app → Settings → Secrets**.\n"
+                    "3. Add the line below, replacing the sample text with your key.\n"
+                    "4. Save the secret and restart the app."
+                )
+                st.code('THE_ODDS_API_KEY = "paste-your-key-here"')
+        else:
+            try:
+                with st.spinner("Loading current DraftKings player props…"):
+                    board = fetch_draftkings_props(api_key, DK_MARKETS[trend_stat_label])
+                if board.empty:
+                    st.info("DraftKings has no WNBA props posted for this market right now. Try again closer to game time.")
+                else:
+                    latest_players = logs.sort_values("game_date").groupby("player", as_index=False).tail(1)
+                    name_lookup = dict(zip(latest_players["player"].map(normalize_player_name), latest_players["player"]))
+                    team_lookup = dict(zip(latest_players["player"], latest_players["team"]))
+                    board["Sportsbook Player"] = board["Player"]
+                    board["Player"] = board["Player"].map(
+                        lambda value: name_lookup.get(normalize_player_name(value), value)
+                    )
+                    board["Team"] = board["Player"].map(team_lookup).fillna("")
+                    board = board.dropna(subset=["Over Odds", "Under Odds"])
+                    st.success(f"Loaded {len(board)} current DraftKings {trend_stat_label.lower()} props. Odds refresh every 15 minutes.")
+                    st.dataframe(
+                        board[["Player", "Team", "Game", "Start Time", "Line", "Over Odds", "Under Odds"]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
+                st.error(f"Could not load DraftKings odds: {exc}")
+                st.info("Check the API key and account quota, or use manual entry below.")
+    else:
+        upload_board = st.file_uploader(
+            "Optional: upload a prop board CSV",
+            type="csv",
+            key="prop_board_upload",
+            help="Columns: Player, Team, Line, Over Odds, Under Odds",
+        )
+        st.download_button(
+            "Download prop-board template",
+            prop_template.to_csv(index=False),
+            "wnba_prop_board.csv",
+            "text/csv",
+        )
+
+        if upload_board is not None:
+            try:
+                board = pd.read_csv(upload_board)
+                needed = {"Player", "Line", "Over Odds", "Under Odds"}
+                missing = needed - set(board.columns)
+                if missing:
+                    raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
+                if "Team" not in board:
+                    board["Team"] = ""
+            except Exception as exc:
+                st.error(f"Could not load prop board: {exc}")
+                board = prop_template
+        else:
+            st.caption("Enter lines and odds directly below. Leave players without a current prop blank.")
+            board = st.data_editor(
+                prop_template,
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                key="prop_editor_all_players",
+                column_config={
+                    "Player": st.column_config.TextColumn(disabled=True),
+                    "Team": st.column_config.TextColumn(disabled=True),
+                    "Line": st.column_config.NumberColumn(min_value=0.0, step=.5),
+                    "Over Odds": st.column_config.NumberColumn(step=5),
+                    "Under Odds": st.column_config.NumberColumn(step=5),
+                },
+            )
+
+    if board.empty:
+        board = prop_template.iloc[0:0]
+
+    trend_stat = STAT_COLUMNS[trend_stat_label]
+    trend_window = 5 if trend_window_label == "Last 5" else 10
+    trend_table = all_player_trends(logs, board, trend_stat, trend_window)
+    if trend_table.empty:
+        st.info("Enter at least one prop line above to generate the all-player hit-rate table.")
+    else:
+        display_side = st.radio("Rank by", ["Over Hit Rate", "Under Hit Rate"], horizontal=True)
+        trend_table = trend_table.sort_values(
+            [display_side, "Games", "Average"],
+            ascending=[False, False, False],
+        ).reset_index(drop=True)
+        trend_table.insert(0, "Rank", np.arange(1, len(trend_table) + 1))
+        st.dataframe(
+            trend_table.style.format({
+                "Line": "{:.1f}", "Average": "{:.1f}",
+                "Over Hit Rate": "{:.0%}", "Under Hit Rate": "{:.0%}",
+            }).background_gradient(subset=[display_side], cmap="RdYlGn"),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.download_button(
+            "Download trend results",
+            trend_table.to_csv(index=False),
+            f"wnba_{trend_stat}_{trend_window}_game_trends.csv",
+            "text/csv",
+        )
 
 players = sorted(logs.player.astype(str).unique())
 player = st.selectbox("Player", players)
