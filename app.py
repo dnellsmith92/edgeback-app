@@ -74,6 +74,47 @@ def validate_logs(df: pd.DataFrame) -> pd.DataFrame:
     return add_combo_stats(out).sort_values("game_date")
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_wehoop_season(season: int, regular_season_only: bool = True) -> pd.DataFrame:
+    """Load a public SportsDataverse wehoop WNBA player-boxscore season."""
+    url = (
+        "https://github.com/sportsdataverse/sportsdataverse-data/releases/download/"
+        f"espn_wnba_player_boxscores/player_box_{season}.parquet"
+    )
+    raw = pd.read_parquet(url)
+    if regular_season_only and "season_type" in raw:
+        raw = raw[raw["season_type"] == 2]
+    if "did_not_play" in raw:
+        raw = raw[~raw["did_not_play"].fillna(False)]
+    mapped = pd.DataFrame({
+        "game_date": raw["game_date"],
+        "player": raw["athlete_display_name"],
+        "team": raw["team_abbreviation"],
+        "opponent": raw["opponent_team_abbreviation"],
+        "home_away": raw["home_away"],
+        "minutes": raw["minutes"],
+        "points": raw["points"],
+        "rebounds": raw["rebounds"],
+        "assists": raw["assists"],
+        "threes": raw["three_point_field_goals_made"],
+        "steals": raw["steals"],
+        "blocks": raw["blocks"],
+        "turnovers": raw["turnovers"],
+        "season": season,
+    })
+    mapped = mapped[pd.to_numeric(mapped["minutes"], errors="coerce").fillna(0) > 0]
+    return validate_logs(mapped)
+
+
+def load_wehoop_seasons(seasons: list[int], regular_season_only: bool = True) -> pd.DataFrame:
+    if not seasons:
+        raise ValueError("Select at least one season")
+    return pd.concat(
+        [load_wehoop_season(year, regular_season_only) for year in seasons],
+        ignore_index=True,
+    ).sort_values("game_date")
+
+
 def demo_logs() -> pd.DataFrame:
     rng = np.random.default_rng(24)
     rows = []
@@ -138,25 +179,52 @@ with st.sidebar:
     max_stake_pct = st.slider("Maximum stake", .005, .05, .02, .005, format="%.3f")
     min_ev = st.slider("Minimum EV to flag", 0.0, .15, .02, .005, format="%.3f")
 
+source = st.radio(
+    "Historical data source",
+    ["Automatic WNBA history", "Upload my CSV", "Demo data"],
+    horizontal=True,
+)
 template = pd.DataFrame(columns=sorted(BASE_REQUIRED))
-upload_col, demo_col, template_col = st.columns([2, 1, 1])
-with upload_col:
-    upload = st.file_uploader("Upload WNBA player game logs", type="csv")
-with demo_col:
-    use_demo = st.toggle("Use demo data")
-with template_col:
-    st.download_button("Download CSV template", template.to_csv(index=False), "wnba_game_logs_template.csv", "text/csv")
+upload = None
+selected_seasons: list[int] = []
+regular_only = True
 
-if upload is None and not use_demo:
-    st.info("Upload a game-log CSV or turn on demo data to explore the analyzer.")
-    with st.expander("Required columns"):
-        st.code(", ".join(sorted(BASE_REQUIRED)))
-    st.stop()
+if source == "Automatic WNBA history":
+    source1, source2 = st.columns([3, 1])
+    with source1:
+        selected_seasons = st.multiselect(
+            "Seasons",
+            [2023, 2024, 2025, 2026],
+            default=[2025, 2026],
+            help="Using recent seasons helps reflect current player roles.",
+        )
+    with source2:
+        regular_only = st.toggle("Regular season only", value=True)
+elif source == "Upload my CSV":
+    upload_col, template_col = st.columns([3, 1])
+    with upload_col:
+        upload = st.file_uploader("Upload WNBA player game logs", type="csv")
+    with template_col:
+        st.download_button("Download CSV template", template.to_csv(index=False), "wnba_game_logs_template.csv", "text/csv")
+    if upload is None:
+        st.info("Upload a game-log CSV to begin.")
+        with st.expander("Required columns"):
+            st.code(", ".join(sorted(BASE_REQUIRED)))
+        st.stop()
 
 try:
-    logs = demo_logs() if use_demo else validate_logs(pd.read_csv(upload))
+    if source == "Automatic WNBA history":
+        with st.spinner("Loading WNBA player game logs…"):
+            logs = load_wehoop_seasons(selected_seasons, regular_only)
+        st.caption(f"Loaded {len(logs):,} player-game records from SportsDataverse wehoop.")
+    elif source == "Demo data":
+        logs = demo_logs()
+    else:
+        logs = validate_logs(pd.read_csv(upload))
 except Exception as exc:
     st.error(f"Could not load game logs: {exc}")
+    if source == "Automatic WNBA history":
+        st.info("Try again shortly or choose 'Upload my CSV' as a fallback.")
     st.stop()
 
 players = sorted(logs.player.astype(str).unique())
