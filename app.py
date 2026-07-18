@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import isfinite
 from statistics import NormalDist
+from zoneinfo import ZoneInfo
 import html
 import json
 import re
@@ -92,6 +93,29 @@ def matchup_label(game: object) -> str:
         if name.strip()
     ]
     return " vs ".join(teams) if len(teams) == 2 else str(game)
+
+
+def viewer_timezone() -> ZoneInfo:
+    """Use the viewer's browser timezone, with Eastern Time as a safe fallback."""
+    try:
+        timezone_name = str(st.context.timezone or "").strip()
+        if timezone_name:
+            return ZoneInfo(timezone_name)
+    except (AttributeError, KeyError, ValueError):
+        pass
+    return ZoneInfo("America/New_York")
+
+
+def matchup_datetime_label(game: object, start_time: object, timezone: ZoneInfo) -> str:
+    """Format an Odds API matchup and UTC start time in the viewer's timezone."""
+    label = matchup_label(game)
+    timestamp = pd.to_datetime(start_time, errors="coerce", utc=True)
+    if pd.isna(timestamp):
+        return label
+    local_time = timestamp.tz_convert(timezone)
+    date_text = f"{local_time.month}/{local_time.day}"
+    time_text = local_time.strftime("%I:%M %p")
+    return f"{label}  {date_text} {time_text} {local_time.tzname()}"
 
 
 def odds_api_key() -> str:
@@ -944,11 +968,21 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
     team_board = board
     if selected_team != "All Teams":
         team_board = board[board["Team"].astype(str) == selected_team].copy()
-    game_options = ["All Games"] + sorted(team_board.get("Game", pd.Series(dtype=str)).dropna().astype(str).unique())
+    game_rows = team_board.reindex(columns=["Game", "Start Time"]).copy()
+    game_rows = game_rows.dropna(subset=["Game"]).drop_duplicates(subset=["Game"])
+    game_rows["_sort_time"] = pd.to_datetime(game_rows["Start Time"], errors="coerce", utc=True)
+    game_rows = game_rows.sort_values(["_sort_time", "Game"], na_position="last")
+    game_times = dict(zip(game_rows["Game"].astype(str), game_rows["Start Time"]))
+    game_options = ["All Games"] + game_rows["Game"].astype(str).tolist()
+    local_timezone = viewer_timezone()
     selected_game = game_filter_slot.selectbox(
         "Game",
         game_options,
-        format_func=lambda value: value if value == "All Games" else matchup_label(value),
+        format_func=lambda value: (
+            value
+            if value == "All Games"
+            else matchup_datetime_label(value, game_times.get(value), local_timezone)
+        ),
     )
     board = team_board
     if selected_game != "All Games":
