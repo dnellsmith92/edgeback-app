@@ -444,11 +444,7 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
                 url = html.escape(str(row.get("Player Link", "")), quote=True)
                 name = html.escape(str(row.get("Player", "")))
                 raw_sort = str(row.get("Player", ""))
-                value = (
-                    f'<a class="prop-player-link" href="{url}" target="_top" '
-                    'onclick="window.top.location.href=this.href; return false;">'
-                    f'{name}</a>'
-                )
+                value = f'<a class="prop-player-link" href="{url}" target="_blank" rel="noopener">{name}</a>'
             elif column == "VS":
                 raw_sort = str(row.get("Opponent", ""))
                 value = html.escape(str(row.get("Opponent", "")))
@@ -556,33 +552,51 @@ def render_player_detail_page(
     selected = st.session_state.get("individual_player_select", players[0])
     if selected not in players:
         selected = players[0]
-    player = st.selectbox("Player", players, index=players.index(selected), key="page_player")
+    player = selected
     games = logs[logs.player.astype(str) == player].sort_values("game_date").copy()
     team = str(games.iloc[-1]["team"])
+
+    st.title(player)
+    st.caption(f"{team} • WNBA")
+
+    current_season = int(games["game_date"].dt.year.max())
+    season_games = games[games["game_date"].dt.year == current_season]
+    st.subheader(f"{current_season} Season Stats")
+    stat1, stat2, stat3, stat4 = st.columns(4)
+    stat1.metric("PTS", f"{season_games['points'].mean():.1f}")
+    stat2.metric("REB", f"{season_games['rebounds'].mean():.1f}")
+    stat3.metric("AST", f"{season_games['assists'].mean():.1f}")
+    stat4.metric("MIN", f"{season_games['minutes'].mean():.1f}")
+
+    st.divider()
+    st.subheader("Trends")
 
     prop_options = list(STAT_COLUMNS)
     selected_prop = st.session_state.get("individual_market_select", "Points")
     if selected_prop not in prop_options:
         selected_prop = "Points"
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        prop_label = st.selectbox("Prop", prop_options, index=prop_options.index(selected_prop), key="page_prop")
+        window_label = st.selectbox("History", ["L5", "L10", "L20", "Season", "H2H"], index=1, key="page_window")
     with c2:
-        sportsbook = str(st.session_state.get("selected_sportsbook", "DraftKings"))
-        line = st.number_input(f"{sportsbook} line", min_value=0.0, value=float(st.session_state.get("individual_line", 19.5)), step=.5, key="page_line")
+        prop_label = st.selectbox("Prop", prop_options, index=prop_options.index(selected_prop), key="page_prop")
     with c3:
-        over_odds = st.number_input("Over odds", value=int(st.session_state.get("individual_over_odds", -110)), step=5, key="page_over")
-    with c4:
-        under_odds = st.number_input("Under odds", value=int(st.session_state.get("individual_under_odds", -110)), step=5, key="page_under")
+        trend_side = st.selectbox("Side", ["Over", "Under"], key="page_side")
 
     opponents = sorted(games.opponent.astype(str).unique())
     selected_opponent = st.session_state.get("selected_opponent", opponents[0])
     if selected_opponent not in opponents:
         selected_opponent = opponents[0]
-    opponent = st.selectbox("Matchup", opponents, index=opponents.index(selected_opponent), key="page_opponent")
-    window_label = st.radio(
-        "History", ["L5", "L10", "L20", "Season", "H2H"], horizontal=True, key="page_window"
-    )
+    sportsbook = str(st.session_state.get("selected_sportsbook", "DraftKings"))
+    c4, c5, c6, c7 = st.columns(4)
+    with c4:
+        opponent = st.selectbox("Matchup", opponents, index=opponents.index(selected_opponent), key="page_opponent")
+    with c5:
+        line = st.number_input(f"{sportsbook} line", min_value=0.0, value=float(st.session_state.get("individual_line", 19.5)), step=.5, key="page_line")
+    with c6:
+        over_odds = st.number_input("Over odds", value=int(st.session_state.get("individual_over_odds", -110)), step=5, key="page_over")
+    with c7:
+        under_odds = st.number_input("Under odds", value=int(st.session_state.get("individual_under_odds", -110)), step=5, key="page_under")
 
     stat = STAT_COLUMNS[prop_label]
     values = games[stat]
@@ -593,7 +607,7 @@ def render_player_detail_page(
     else:
         view_games = games.tail(int(window_label[1:]))
     view_values = view_games[stat]
-    projection, components = project_stat(games, stat, "H", opponent)
+    projection, projection_components = project_stat(games, stat, "H", opponent)
     spread = max(float(values.tail(20).std(ddof=1)), .75) if len(values) > 1 else 1.0
     model_over = 1 - NormalDist(mu=projection, sigma=spread).cdf(line)
     model_under = 1 - model_over
@@ -605,13 +619,12 @@ def render_player_detail_page(
     best_decimal = american_to_decimal(int(over_odds if best_side == "Over" else under_odds))
     stake_pct = min(kelly_fraction(best_prob, best_decimal) * kelly_multiplier, max_stake_pct)
 
-    st.title(f"{player} ({team})")
-    st.caption(f"{prop_label} • {team} vs {opponent}")
+    selected_hit_rate = hit_rate(view_values, line, trend_side)
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Projection", f"{projection:.1f}")
-    m2.metric("Selected average", "N/A" if view_values.empty else f"{view_values.mean():.1f}")
-    m3.metric("Over hit rate", "N/A" if view_values.empty else f"{hit_rate(view_values, line, 'Over'):.0%}")
-    m4.metric("Under hit rate", "N/A" if view_values.empty else f"{hit_rate(view_values, line, 'Under'):.0%}")
+    m1.metric("Line", f"{line:g}")
+    m2.metric("Odds", f"{int(over_odds if trend_side == 'Over' else under_odds):+d}")
+    m3.metric("Average", "N/A" if view_values.empty else f"{view_values.mean():.1f}")
+    m4.metric("Hit Rate", "N/A" if view_values.empty else f"{selected_hit_rate:.0%}")
 
     if best_ev > 0:
         stake = bankroll * stake_pct if best_ev >= min_ev else 0.0
@@ -619,10 +632,49 @@ def render_player_detail_page(
     else:
         st.warning(f"No positive estimated value at the current prices. Best side: {best_side} {best_ev:+.1%}.")
 
-    chart = view_games.set_index("game_date")[[stat]].rename(columns={stat: prop_label})
-    chart["Prop line"] = line
-    st.subheader("Performance trend")
-    st.line_chart(chart)
+    chart_games = view_games.tail(20).copy()
+    max_value = max(float(chart_games[stat].max()) if not chart_games.empty else line, line, 1.0) * 1.15
+    bars = []
+    for _, game in chart_games.iterrows():
+        actual = float(game[stat])
+        covered = actual > line if trend_side == "Over" else actual < line
+        color = "#00c968" if covered else "#ff2638"
+        height = max(8.0, actual / max_value * 230)
+        bars.append(
+            '<div class="trend-col">'
+            f'<div class="trend-bar" style="height:{height:.1f}px;background:{color};"><b>{actual:g}</b></div>'
+            f'<span>{html.escape(str(game["opponent"]))}</span>'
+            f'<small>{pd.Timestamp(game["game_date"]).strftime("%m/%d")}</small>'
+            '</div>'
+        )
+    line_bottom = 42 + line / max_value * 230
+    chart_html = f"""
+    <html><head><style>
+    html,body{{margin:0;background:#0e1117;color:#fff;font-family:Arial,sans-serif;}}
+    .chart{{height:310px;position:relative;display:flex;align-items:flex-end;gap:8px;padding:10px 8px 42px;box-sizing:border-box;}}
+    .prop-line{{position:absolute;left:0;right:0;bottom:{line_bottom:.1f}px;border-top:2px solid #ffae00;z-index:2;}}
+    .prop-line b{{background:#ffae00;color:#111;padding:4px 7px;border-radius:6px;position:absolute;left:0;top:-14px;}}
+    .trend-col{{height:250px;flex:1;min-width:38px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;position:relative;}}
+    .trend-bar{{width:100%;max-width:70px;border-radius:8px 8px 2px 2px;text-align:center;box-sizing:border-box;padding-top:7px;}}
+    .trend-col span{{font-weight:700;margin-top:6px;font-size:.75rem;}}
+    .trend-col small{{color:#9da3ae;font-size:.7rem;margin-top:2px;}}
+    </style></head><body><div class="chart"><div class="prop-line"><b>{line:g}</b></div>{''.join(bars)}</div></body></html>
+    """
+    components.html(chart_html, height=320, scrolling=True)
+
+    result_rows = []
+    for _, game in chart_games.sort_values("game_date", ascending=False).iterrows():
+        actual = float(game[stat])
+        covered = actual > line if trend_side == "Over" else actual < line
+        result_rows.append({
+            "Result": "✅ Covered" if covered else "❌ Missed",
+            "Date": pd.Timestamp(game["game_date"]).date(),
+            "VS": game["opponent"],
+            "Venue": "Home" if game["home_away"] == "H" else "Away",
+            prop_label: actual,
+            "Pick": f"{trend_side} {line:g}",
+        })
+    st.dataframe(pd.DataFrame(result_rows), hide_index=True, use_container_width=True)
 
     split_rows = []
     for label, subset in [
@@ -634,19 +686,16 @@ def render_player_detail_page(
             "Split": label, "Games": len(subset), "Average": subset[stat].mean(),
             "Over": hit_rate(subset[stat], line, "Over"), "Under": hit_rate(subset[stat], line, "Under"),
         })
-    st.subheader("Historical splits")
-    st.dataframe(
-        pd.DataFrame(split_rows), hide_index=True, use_container_width=True,
-        column_config={
-            "Average": st.column_config.NumberColumn(format="%.1f"),
-            "Over": st.column_config.NumberColumn(format="percent"),
-            "Under": st.column_config.NumberColumn(format="percent"),
-        },
-    )
-    st.subheader("Recent game logs")
-    cols = ["game_date", "opponent", "home_away", "minutes", "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers"]
-    st.dataframe(games.sort_values("game_date", ascending=False)[cols].head(20), hide_index=True, use_container_width=True)
-    st.caption("Projection components: " + ", ".join(components) + ". Research only; estimates are not guarantees.")
+    with st.expander("Historical splits"):
+        st.dataframe(
+            pd.DataFrame(split_rows), hide_index=True, use_container_width=True,
+            column_config={
+                "Average": st.column_config.NumberColumn(format="%.1f"),
+                "Over": st.column_config.NumberColumn(format="percent"),
+                "Under": st.column_config.NumberColumn(format="percent"),
+            },
+        )
+    st.caption("Projection components: " + ", ".join(projection_components) + ". Research only; estimates are not guarantees.")
 
 
 st.title("🏀 WNBA Prop Labs")
