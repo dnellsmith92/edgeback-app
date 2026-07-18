@@ -444,7 +444,7 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
                 url = html.escape(str(row.get("Player Link", "")), quote=True)
                 name = html.escape(str(row.get("Player", "")))
                 raw_sort = str(row.get("Player", ""))
-                value = f'<a class="prop-player-link" href="{url}" target="_blank" rel="noopener">{name}</a>'
+                value = f'<a class="prop-player-link" href="{url}" target="_top">{name}</a>'
             elif column == "VS":
                 raw_sort = str(row.get("Opponent", ""))
                 value = html.escape(str(row.get("Opponent", "")))
@@ -724,13 +724,12 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
     st.caption("Filter the sportsbook prop feed, compare L5/L10/L20 hit rates, and click a player for full details.")
     trend1, trend2, trend3 = st.columns(3)
     with trend1:
-        trend_stat_label = st.radio(
-            "Prop category", ["All Props", "Points", "Rebounds", "Assists"], horizontal=True
+        trend_stat_label = st.selectbox(
+            "Prop category", ["All Props", "Points", "Rebounds", "Assists"]
         )
-        odds_source = st.radio(
+        odds_source = st.selectbox(
             "Sportsbook odds source",
             ["DraftKings", "FanDuel", "BetOnline"],
-            horizontal=True,
         )
     with trend2:
         team_options = ["All Teams"] + sorted(
@@ -739,7 +738,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         selected_team = st.selectbox("Team", team_options)
         game_filter_slot = st.empty()
     with trend3:
-        side_filter = st.radio("Side", ["Best side", "Over", "Under"], horizontal=True)
+        side_filter = st.selectbox("Side", ["Best side", "Over", "Under"])
 
     prop_template = make_prop_board(logs, [])
     board = pd.DataFrame()
