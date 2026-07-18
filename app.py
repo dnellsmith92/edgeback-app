@@ -594,11 +594,6 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                     board = board.dropna(subset=["Over Odds", "Under Odds"])
                     category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
                     st.success(f"Loaded {len(board)} current DraftKings {category_text} props. Odds refresh every 15 minutes.")
-                    st.dataframe(
-                        board[["Player", "Team", "Prop", "Game", "Start Time", "Line", "Over Odds", "Under Odds"]],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
             except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
                 st.error(f"Could not load DraftKings odds: {exc}")
                 st.info("Check the API key and account quota, or use manual entry below.")
@@ -656,7 +651,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
         st.info("Enter at least one prop line above to generate the all-player hit-rate table.")
     else:
         trend_table.insert(0, "Rank", np.arange(1, len(trend_table) + 1))
-        st.caption("Click any player row to open that player in the Individual Player Analyzer below.")
+        st.caption("Click any player row to open that player's separate analysis page.")
         ranking_event = st.dataframe(
             trend_table,
             use_container_width=True,
@@ -665,12 +660,13 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             selection_mode="single-row",
             key=f"prop_rankings_{trend_stat_label}_{trend_window}_{side_filter}",
             column_order=[
-                "Rank", "Player", "Team", "Prop", "Pick", "Odds", "Game",
+                "Rank", "Player", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
                 "Average", "L5", "L10", "L20", "H2H",
             ],
             column_config={
                 "Rank": st.column_config.NumberColumn(format="%d"),
                 "Line": st.column_config.NumberColumn(format="%.1f"),
+                "Opponent": st.column_config.TextColumn("VS"),
                 "Average": st.column_config.NumberColumn(format="%.1f"),
                 "L5": st.column_config.ProgressColumn(
                     format="percent", min_value=0.0, max_value=1.0
@@ -720,10 +716,12 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 use_container_width=True,
                 hide_index=True,
                 column_order=[
-                    "EV+", "Player", "Team", "Prop", "Pick", "Odds",
+                    "EV+", "Player", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
                     "Estimated EV", "Fair Odds", "Average", "L5", "L10", "L20", "H2H",
                 ],
                 column_config={
+                    "Line": st.column_config.NumberColumn(format="%.1f"),
+                    "Opponent": st.column_config.TextColumn("VS"),
                     "Estimated EV": st.column_config.ProgressColumn(
                         format="percent", min_value=0.0, max_value=max(.01, float(ev_table["Estimated EV"].max()))
                     ),
@@ -740,6 +738,10 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             f"wnba_{trend_stat}_{trend_window}_game_trends.csv",
             "text/csv",
         )
+
+# The detailed analyzer is rendered as its own view after a prop-row click.
+# Keep the main page focused on the prop feed and EV+ candidates.
+st.stop()
 
 st.divider()
 st.header("🔎 Individual Player Analyzer")
