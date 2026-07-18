@@ -45,7 +45,11 @@ WNBA_TEAM_ABBREVIATIONS = {
     "Dallas Wings": "DAL", "Golden State Valkyries": "GSV", "Indiana Fever": "IND",
     "Las Vegas Aces": "LVA", "Los Angeles Sparks": "LAS", "Minnesota Lynx": "MIN",
     "New York Liberty": "NYL", "Phoenix Mercury": "PHX", "Seattle Storm": "SEA",
-    "Washington Mystics": "WAS",
+    "Washington Mystics": "WAS", "Portland Fire": "POR", "Toronto Tempo": "TOR",
+}
+WNBA_TEAM_ALIASES = {
+    "NY": "NYL", "GS": "GSV", "LV": "LVA", "LA": "LAS", "WSH": "WAS",
+    "PHO": "PHX",
 }
 
 
@@ -56,7 +60,8 @@ def normalize_player_name(value: object) -> str:
 
 def matchup_opponent(game: object, player_team: object) -> str:
     teams = [WNBA_TEAM_ABBREVIATIONS.get(name.strip(), "") for name in str(game).split(" @ ")]
-    return next((team for team in teams if team and team != str(player_team)), "")
+    normalized_player_team = WNBA_TEAM_ALIASES.get(str(player_team), str(player_team))
+    return next((team for team in teams if team and team != normalized_player_team), "")
 
 
 def odds_api_key() -> str:
@@ -478,12 +483,11 @@ def render_player_detail_page(
 st.title("🏀 WNBA Historical Prop Lab")
 st.caption("Compare a sportsbook prop with a player's historical game logs—no live-statistics subscription required.")
 
-with st.sidebar:
-    st.header("Bankroll controls")
-    bankroll = st.number_input("Bankroll ($)", min_value=1.0, value=1000.0, step=100.0)
-    kelly_multiplier = st.slider("Kelly multiplier", .05, .50, .25, .05)
-    max_stake_pct = st.slider("Maximum stake", .005, .05, .02, .005, format="%.3f")
-    min_ev = st.slider("Minimum EV to flag", 0.0, .15, .02, .005, format="%.3f")
+# Internal risk defaults keep EV and staking estimates consistent without a sidebar.
+bankroll = 100.0
+kelly_multiplier = .25
+max_stake_pct = .02
+min_ev = .02
 
 source = st.radio(
     "Historical data source",
