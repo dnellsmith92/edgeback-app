@@ -1,134 +1,254 @@
 from __future__ import annotations
 
-import io
+from math import isfinite
+from statistics import NormalDist
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
-from backtest import BacktestConfig, run_backtest
-from odds import add_market_probabilities, to_decimal
+
+st.set_page_config(page_title="WNBA Prop Lab", page_icon="🏀", layout="wide")
+
+STAT_COLUMNS = {
+    "Points": "points",
+    "Rebounds": "rebounds",
+    "Assists": "assists",
+    "3-Pointers Made": "threes",
+    "Steals": "steals",
+    "Blocks": "blocks",
+    "Turnovers": "turnovers",
+    "Points + Rebounds": "points_rebounds",
+    "Points + Assists": "points_assists",
+    "Rebounds + Assists": "rebounds_assists",
+    "Points + Rebounds + Assists": "pra",
+}
+BASE_REQUIRED = {
+    "game_date", "player", "team", "opponent", "home_away", "minutes",
+    "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers",
+}
 
 
-def load_betting_data(file, odds_format="decimal"):
-    df = pd.read_csv(file)
+def american_to_decimal(odds: int) -> float:
+    if odds == 0:
+        raise ValueError("American odds cannot be zero")
+    return 1 + odds / 100 if odds > 0 else 1 + 100 / abs(odds)
 
-    required = {
-        "event_id",
-        "event_time",
-        "settled_time",
-        "sportsbook",
-        "market",
-        "selection",
-        "odds",
-        "won",
-    }
 
-    missing = required - set(df.columns)
+def american_implied(odds: int) -> float:
+    return 1 / american_to_decimal(odds)
 
+
+def fair_american(probability: float) -> str:
+    p = min(max(probability, 0.0001), 0.9999)
+    value = -100 * p / (1 - p) if p >= .5 else 100 * (1 - p) / p
+    return f"{value:+.0f}"
+
+
+def add_combo_stats(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["points_rebounds"] = out["points"] + out["rebounds"]
+    out["points_assists"] = out["points"] + out["assists"]
+    out["rebounds_assists"] = out["rebounds"] + out["assists"]
+    out["pra"] = out["points"] + out["rebounds"] + out["assists"]
+    return out
+
+
+def validate_logs(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [str(c).strip().lower() for c in out.columns]
+    missing = BASE_REQUIRED - set(out.columns)
     if missing:
-        raise ValueError(f"Missing columns: {sorted(missing)}")
+        raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
+    out["game_date"] = pd.to_datetime(out["game_date"], errors="coerce")
+    if out["game_date"].isna().any():
+        raise ValueError("Some game_date values are invalid")
+    numeric = ["minutes", "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers"]
+    for col in numeric:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    if out[numeric].isna().any().any():
+        raise ValueError("One or more statistic columns contain non-numeric values")
+    out["home_away"] = out["home_away"].astype(str).str.upper().str[0]
+    if not out["home_away"].isin(["H", "A"]).all():
+        raise ValueError("home_away must contain H/Home or A/Away")
+    return add_combo_stats(out).sort_values("game_date")
 
-    df["decimal_odds"] = to_decimal(df["odds"], odds_format)
-    return add_market_probabilities(df)
-st.set_page_config(page_title="EdgeBack", page_icon="📈", layout="wide")
-st.title("EdgeBack Sports Betting Analyzer")
-st.caption("Upload historical pregame odds and results to run a leakage-safe walk-forward backtest.")
+
+def demo_logs() -> pd.DataFrame:
+    rng = np.random.default_rng(24)
+    rows = []
+    opponents = ["NYL", "CON", "ATL", "CHI", "IND", "MIN"]
+    for i in range(32):
+        minutes = float(np.clip(rng.normal(32, 3), 22, 38))
+        home = i % 2 == 0
+        rows.append({
+            "game_date": pd.Timestamp("2026-05-15") + pd.Timedelta(days=i * 2),
+            "player": "Demo Player", "team": "WAS", "opponent": opponents[i % len(opponents)],
+            "home_away": "H" if home else "A", "minutes": round(minutes, 1),
+            "points": max(2, int(rng.normal(19 + (1.5 if home else 0), 5))),
+            "rebounds": max(0, int(rng.normal(7, 2.5))), "assists": max(0, int(rng.normal(4, 2))),
+            "threes": max(0, int(rng.normal(1.8, 1.2))), "steals": max(0, int(rng.normal(1.2, .8))),
+            "blocks": max(0, int(rng.normal(.8, .7))), "turnovers": max(0, int(rng.normal(2.2, 1))),
+        })
+    return validate_logs(pd.DataFrame(rows))
+
+
+def hit_rate(values: pd.Series, line: float, side: str) -> float:
+    if values.empty:
+        return float("nan")
+    return float((values > line).mean() if side == "Over" else (values < line).mean())
+
+
+def project_stat(games: pd.DataFrame, stat: str, venue: str, opponent: str) -> tuple[float, list[str]]:
+    """Transparent recency/split projection; all inputs precede the analyzed game."""
+    pieces: list[tuple[float, float, str]] = []
+    values = games[stat]
+    pieces.append((float(values.tail(5).mean()), .40, "last 5"))
+    pieces.append((float(values.tail(10).mean()), .30, "last 10"))
+    pieces.append((float(values.mean()), .15, "season"))
+    venue_values = games.loc[games.home_away == venue, stat]
+    if len(venue_values) >= 3:
+        pieces.append((float(venue_values.mean()), .10, "venue"))
+    opp_values = games.loc[games.opponent == opponent, stat]
+    if len(opp_values) >= 2:
+        pieces.append((float(opp_values.mean()), .05, "opponent"))
+    total_weight = sum(weight for _, weight, _ in pieces)
+    projection = sum(value * weight for value, weight, _ in pieces) / total_weight
+    return projection, [label for _, _, label in pieces]
+
+
+def no_vig_probs(over_odds: int, under_odds: int) -> tuple[float, float]:
+    over_raw, under_raw = american_implied(over_odds), american_implied(under_odds)
+    total = over_raw + under_raw
+    return over_raw / total, under_raw / total
+
+
+def kelly_fraction(probability: float, decimal_odds: float) -> float:
+    b = decimal_odds - 1
+    return max(0.0, (probability * decimal_odds - 1) / b)
+
+
+st.title("🏀 WNBA Historical Prop Lab")
+st.caption("Compare a sportsbook prop with a player's historical game logs—no live-statistics subscription required.")
 
 with st.sidebar:
-    st.header("Strategy settings")
-    odds_format = st.selectbox("Odds format", ["decimal", "american", "fractional"])
-    initial_bankroll = st.number_input("Starting bankroll ($)", min_value=1.0, value=1000.0, step=100.0)
-    min_train_rows = st.number_input("Minimum training rows", min_value=20, value=200, step=20)
-    retrain_every = st.number_input("Retrain every N rows", min_value=1, value=50, step=10)
-    min_edge = st.slider("Minimum probability edge", 0.0, 0.20, 0.02, 0.005, format="%.3f")
-    min_ev = st.slider("Minimum expected value", 0.0, 0.30, 0.01, 0.005, format="%.3f")
-    kelly_fraction = st.slider("Kelly fraction", 0.05, 1.0, 0.25, 0.05)
-    max_bet_fraction = st.slider("Maximum stake per bet", 0.005, 0.10, 0.03, 0.005, format="%.3f")
-    max_event_exposure = st.slider("Maximum simultaneous exposure", 0.01, 0.50, 0.10, 0.01)
+    st.header("Bankroll controls")
+    bankroll = st.number_input("Bankroll ($)", min_value=1.0, value=1000.0, step=100.0)
+    kelly_multiplier = st.slider("Kelly multiplier", .05, .50, .25, .05)
+    max_stake_pct = st.slider("Maximum stake", .005, .05, .02, .005, format="%.3f")
+    min_ev = st.slider("Minimum EV to flag", 0.0, .15, .02, .005, format="%.3f")
 
-uploaded = st.file_uploader("Upload a historical betting CSV", type="csv")
+template = pd.DataFrame(columns=sorted(BASE_REQUIRED))
+upload_col, demo_col, template_col = st.columns([2, 1, 1])
+with upload_col:
+    upload = st.file_uploader("Upload WNBA player game logs", type="csv")
+with demo_col:
+    use_demo = st.toggle("Use demo data")
+with template_col:
+    st.download_button("Download CSV template", template.to_csv(index=False), "wnba_game_logs_template.csv", "text/csv")
 
-with st.expander("Required CSV format"):
-    st.markdown(
-        "Required columns: `event_id`, `event_time`, `settled_time`, `sportsbook`, "
-        "`market`, `selection`, `odds`, and `won`. Add numeric columns containing only "
-        "information known before the event; those become model features."
-    )
-
-if uploaded is None:
-    st.info("Upload a CSV to begin. You can also use `data/sample_games.csv` included with the project.")
+if upload is None and not use_demo:
+    st.info("Upload a game-log CSV or turn on demo data to explore the analyzer.")
+    with st.expander("Required columns"):
+        st.code(", ".join(sorted(BASE_REQUIRED)))
     st.stop()
 
 try:
-    raw = pd.read_csv(uploaded)
+    logs = demo_logs() if use_demo else validate_logs(pd.read_csv(upload))
 except Exception as exc:
-    st.error(f"The CSV could not be read: {exc}")
+    st.error(f"Could not load game logs: {exc}")
     st.stop()
 
-reserved = {
-    "event_id", "event_time", "settled_time", "sportsbook", "market", "selection",
-    "odds", "won", "decimal_odds", "implied_prob", "overround", "no_vig_prob",
-}
-numeric_features = [
-    col for col in raw.columns
-    if col not in reserved and pd.api.types.is_numeric_dtype(raw[col])
-]
+players = sorted(logs.player.astype(str).unique())
+player = st.selectbox("Player", players)
+player_games = logs[logs.player.astype(str) == player].sort_values("game_date").copy()
 
-st.subheader("Data and model")
-left, right = st.columns([2, 1])
-with left:
-    features = st.multiselect("Pregame feature columns", numeric_features, default=numeric_features[:5])
-with right:
-    st.metric("Rows loaded", f"{len(raw):,}")
+setup1, setup2, setup3, setup4 = st.columns(4)
+with setup1:
+    market_label = st.selectbox("Prop", list(STAT_COLUMNS))
+with setup2:
+    line = st.number_input("Sportsbook line", min_value=0.0, value=19.5, step=.5)
+with setup3:
+    over_odds = st.number_input("Over odds (American)", value=-110, step=5)
+with setup4:
+    under_odds = st.number_input("Under odds (American)", value=-110, step=5)
 
-if st.button("Run backtest", type="primary", use_container_width=True):
-    if not features:
-        st.error("Select at least one numeric pregame feature.")
-        st.stop()
-    try:
-        uploaded.seek(0)
-        data = load_betting_data(uploaded, odds_format)
-        config = BacktestConfig(
-            initial_bankroll=initial_bankroll,
-            min_train_rows=int(min_train_rows),
-            retrain_every=int(retrain_every),
-            min_edge=min_edge,
-            min_ev=min_ev,
-            kelly_fraction=kelly_fraction,
-            max_bet_fraction=max_bet_fraction,
-            max_event_exposure=max_event_exposure,
-        )
-        with st.spinner("Training historical windows and simulating bets…"):
-            result = run_backtest(data, features, config)
-    except Exception as exc:
-        st.error(f"Backtest failed: {exc}")
-        st.stop()
+context1, context2 = st.columns(2)
+with context1:
+    venue = st.radio("Upcoming venue", ["H", "A"], format_func=lambda x: "Home" if x == "H" else "Away", horizontal=True)
+with context2:
+    opponent_options = sorted(player_games.opponent.astype(str).unique())
+    opponent = st.selectbox("Upcoming opponent", opponent_options)
 
-    m = result.metrics
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("ROI", f"{m['roi']:.2%}")
-    c2.metric("Win rate", f"{m['win_rate']:.2%}")
-    c3.metric("Final bankroll", f"${m['final_bankroll']:,.2f}", f"${m['net_profit']:,.2f}")
-    c4.metric("Maximum drawdown", f"{m['max_drawdown']:.2%}")
+stat = STAT_COLUMNS[market_label]
+values = player_games[stat]
+projection, components = project_stat(player_games, stat, venue, opponent)
+spread = float(values.tail(20).std(ddof=1)) if len(values) > 1 else 1.0
+spread = max(spread, .75)
+dist = NormalDist(mu=projection, sigma=spread)
+model_over = 1 - dist.cdf(line)
+model_under = dist.cdf(line)
+market_over, market_under = no_vig_probs(int(over_odds), int(under_odds))
+over_decimal, under_decimal = american_to_decimal(int(over_odds)), american_to_decimal(int(under_odds))
+over_ev = model_over * over_decimal - 1
+under_ev = model_under * under_decimal - 1
+best_side = "Over" if over_ev >= under_ev else "Under"
+best_ev = max(over_ev, under_ev)
+best_prob = model_over if best_side == "Over" else model_under
+best_decimal = over_decimal if best_side == "Over" else under_decimal
+stake_fraction = min(kelly_fraction(best_prob, best_decimal) * kelly_multiplier, max_stake_pct)
+stake = bankroll * stake_fraction if best_ev >= min_ev else 0.0
 
-    st.subheader("Bankroll performance")
-    if result.bets.empty:
-        st.warning("No bets met the selected edge and EV thresholds. Try lower thresholds or check the data.")
-    else:
-        curve = result.bets.drop_duplicates("event_time", keep="last").set_index("event_time")[["closing_bankroll"]]
-        st.line_chart(curve, y_label="Bankroll ($)")
-        st.subheader("Bet ledger")
-        st.dataframe(result.bets, use_container_width=True, hide_index=True)
+st.subheader(f"{player} — {market_label} {line:g}")
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Projection", f"{projection:.1f}")
+m2.metric("Last 5 average", f"{values.tail(5).mean():.1f}")
+m3.metric("Last 10 average", f"{values.tail(10).mean():.1f}")
+m4.metric("Season average", f"{values.mean():.1f}")
+m5.metric("Average minutes", f"{player_games.minutes.tail(10).mean():.1f}")
 
-    def csv_bytes(frame: pd.DataFrame) -> bytes:
-        return frame.to_csv(index=False).encode("utf-8")
+summary = pd.DataFrame([
+    {"Side": "Over", "Model probability": model_over, "No-vig market probability": market_over,
+     "Edge": model_over - market_over, "EV": over_ev, "Fair odds": fair_american(model_over),
+     "Overall hit rate": hit_rate(values, line, "Over")},
+    {"Side": "Under", "Model probability": model_under, "No-vig market probability": market_under,
+     "Edge": model_under - market_under, "EV": under_ev, "Fair odds": fair_american(model_under),
+     "Overall hit rate": hit_rate(values, line, "Under")},
+])
+st.dataframe(summary.style.format({
+    "Model probability": "{:.1%}", "No-vig market probability": "{:.1%}", "Edge": "{:+.1%}",
+    "EV": "{:+.1%}", "Overall hit rate": "{:.1%}",
+}), use_container_width=True, hide_index=True)
 
-    d1, d2 = st.columns(2)
-    d1.download_button("Download bets.csv", csv_bytes(result.bets), "bets.csv", "text/csv", use_container_width=True)
-    d2.download_button(
-        "Download predictions.csv", csv_bytes(result.predictions), "predictions.csv", "text/csv",
-        use_container_width=True,
-    )
+if best_ev >= min_ev:
+    st.success(f"Research signal: {best_side} {line:g} | EV {best_ev:+.1%} | capped fractional-Kelly stake ${stake:,.2f}")
+else:
+    st.warning(f"No side clears the selected {min_ev:.1%} EV threshold. Best estimate: {best_side} at {best_ev:+.1%} EV.")
 
-st.divider()
-st.caption("For research and education only. Backtests do not guarantee future profit. Bet only what you can afford to lose.")
+split_rows = []
+for label, subset in [
+    ("All games", player_games), ("Last 5", player_games.tail(5)), ("Last 10", player_games.tail(10)),
+    ("Last 20", player_games.tail(20)), ("Home", player_games[player_games.home_away == "H"]),
+    ("Away", player_games[player_games.home_away == "A"]),
+    (f"vs {opponent}", player_games[player_games.opponent == opponent]),
+]:
+    split_rows.append({"Split": label, "Games": len(subset), "Average": subset[stat].mean(),
+                       "Over hit rate": hit_rate(subset[stat], line, "Over"),
+                       "Under hit rate": hit_rate(subset[stat], line, "Under")})
+splits = pd.DataFrame(split_rows)
+
+chart_col, split_col = st.columns([3, 2])
+with chart_col:
+    st.subheader("Game-log trend")
+    chart = player_games.set_index("game_date")[[stat]].tail(20).rename(columns={stat: market_label})
+    chart["Prop line"] = line
+    st.line_chart(chart)
+with split_col:
+    st.subheader("Historical splits")
+    st.dataframe(splits.style.format({"Average": "{:.1f}", "Over hit rate": "{:.1%}", "Under hit rate": "{:.1%}"}),
+                 use_container_width=True, hide_index=True)
+
+st.subheader("Recent game logs")
+display_cols = ["game_date", "opponent", "home_away", "minutes", "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers"]
+st.dataframe(player_games.sort_values("game_date", ascending=False)[display_cols].head(20), use_container_width=True, hide_index=True)
+st.caption("Projection components: " + ", ".join(components) + ". Research only; historical performance does not guarantee future results.")
