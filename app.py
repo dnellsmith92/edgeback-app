@@ -379,6 +379,11 @@ def prop_feed(
         )
         spread = max(float(values.tail(20).std(ddof=1)), .75) if len(values) > 1 else 1.0
         over_probability = 1 - NormalDist(mu=projection, sigma=spread).cdf(line)
+        under_probability = 1 - over_probability
+        market_over, market_under = no_vig_probs(
+            int(prop.get("Over Odds", -110)),
+            int(prop.get("Under Odds", -110)),
+        )
         model_probability = over_probability if side == "Over" else 1 - over_probability
         estimated_ev = model_probability * american_to_decimal(odds) - 1
         player_link = APP_URL + "?" + urlencode({
@@ -397,6 +402,9 @@ def prop_feed(
             "Average": float(values.tail(rank_window).mean()),
             "EV+": "EV+" if estimated_ev > 0 else "—",
             "Estimated EV": estimated_ev, "Fair Odds": fair_american(model_probability),
+            "Over %": over_probability, "Under %": under_probability,
+            "Edge (Over)": over_probability - market_over,
+            "Edge (Under)": under_probability - market_under,
             "Game": prop.get("Game", ""), "Opponent": opponent,
         })
     if not rows:
@@ -406,18 +414,20 @@ def prop_feed(
 
 
 def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
-    """Render clickable white player links and neon-green percentage bars."""
+    """Render sortable prop tables with traffic-light percentage bars."""
     if ev_only:
         columns = [
-            "EV+", "Player", "Team", "Prop", "Line", "Pick", "Odds", "VS",
-            "Estimated EV", "Fair Odds", "Average", "L5", "L10", "L20", "H2H",
+            "Player", "Team", "VS", "Prop", "Line", "Average", "Pick", "Odds",
+            "Fair Odds", "Estimated EV", "Over %", "Under %",
+            "Edge (Over)", "Edge (Under)",
         ]
     else:
         columns = [
             "Player", "Team", "Prop", "Line", "Pick", "Odds", "VS",
             "Average", "L5", "L10", "L20", "H2H",
         ]
-    percent_columns = {"L5", "L10", "L20", "H2H", "Estimated EV"}
+    rate_columns = {"L5", "L10", "L20", "H2H", "Over %", "Under %"}
+    delta_columns = {"Estimated EV", "Edge (Over)", "Edge (Under)"}
     table_id = "ev-prop-table" if ev_only else "main-prop-table"
     header_cells = []
     for index, column in enumerate(columns):
@@ -438,7 +448,7 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
             elif column == "VS":
                 raw_sort = str(row.get("Opponent", ""))
                 value = html.escape(str(row.get("Opponent", "")))
-            elif column in percent_columns:
+            elif column in rate_columns:
                 raw = row.get(column, np.nan)
                 raw_sort = "" if pd.isna(raw) else str(float(raw))
                 if pd.isna(raw):
@@ -446,11 +456,21 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
                 else:
                     pct = float(raw) * 100
                     bar_width = min(max(pct, 0.0), 100.0)
+                    color_class = "rate-green" if pct >= 70 else "rate-red" if pct <= 50 else "rate-yellow"
                     value = (
-                        '<div class="prop-percent">'
+                        f'<div class="prop-percent {color_class}">'
                         f'<div class="prop-bar"><span style="width:{bar_width:.1f}%"></span></div>'
                         f'<b>{pct:.0f}%</b></div>'
                     )
+            elif column in delta_columns:
+                raw = row.get(column, np.nan)
+                raw_sort = "" if pd.isna(raw) else str(float(raw))
+                if pd.isna(raw):
+                    value = "—"
+                else:
+                    raw = float(raw)
+                    delta_class = "delta-positive" if raw > 0 else "delta-negative" if raw < 0 else "delta-neutral"
+                    value = f'<b class="{delta_class}">{raw:+.1%}</b>'
             elif column in {"Line", "Average"}:
                 raw_sort = str(float(row.get(column, 0)))
                 value = f"{float(row.get(column, 0)):.1f}"
@@ -474,9 +494,15 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
         .prop-sort-link {color:#d9dee7; font-weight:700; text-decoration:none; border:0; background:transparent; padding:0; cursor:pointer; font-size:inherit; white-space:nowrap;}
         .prop-sort-link:hover {color:#71ff9a;}
         .sort-arrow {color:#71ff9a; margin-left:4px;}
-        .prop-percent {display:flex; align-items:center; gap:8px; min-width:110px; color:#71ff9a;}
+        .prop-percent {display:flex; align-items:center; gap:8px; min-width:110px;}
         .prop-bar {width:72px; height:8px; overflow:hidden; border-radius:10px; background:#30363d;}
-        .prop-bar span {display:block; height:100%; border-radius:10px; background:#39ff7a; box-shadow:0 0 8px #39ff7a;}
+        .prop-bar span {display:block; height:100%; border-radius:10px; background:currentColor; box-shadow:0 0 8px currentColor;}
+        .rate-green {color:#39ff7a;}
+        .rate-yellow {color:#ffe04b;}
+        .rate-red {color:#ff4b4b;}
+        .delta-positive {color:#39ff7a;}
+        .delta-negative {color:#ff4b4b;}
+        .delta-neutral {color:#ffe04b;}
         </style></head><body>
         """
         + f'<div class="prop-table-wrap"><table id="{table_id}" class="prop-table"><thead><tr>'
