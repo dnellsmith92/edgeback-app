@@ -37,12 +37,24 @@ BASE_REQUIRED = {
 }
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 APP_URL = "https://edgeback-app-gnvtxztutnsbhmjp5cftvg.streamlit.app/"
-DK_MARKETS = {
+SPORTSBOOK_PROP_MARKETS = {
     "Points": "player_points",
     "Rebounds": "player_rebounds",
     "Assists": "player_assists",
+    "3-Pointers Made": "player_threes",
+    "Steals": "player_steals",
+    "Blocks": "player_blocks",
+    "Turnovers": "player_turnovers",
+    "Points + Rebounds": "player_points_rebounds",
+    "Points + Assists": "player_points_assists",
+    "Rebounds + Assists": "player_rebounds_assists",
+    "Points + Rebounds + Assists": "player_points_rebounds_assists",
 }
-DK_MARKET_LABELS = {value: key for key, value in DK_MARKETS.items()}
+DK_MARKETS = {
+    label: SPORTSBOOK_PROP_MARKETS[label]
+    for label in ("Points", "Rebounds", "Assists")
+}
+DK_MARKET_LABELS = {value: key for key, value in SPORTSBOOK_PROP_MARKETS.items()}
 SPORTSBOOKS = {
     "DraftKings": "draftkings",
     "FanDuel": "fanduel",
@@ -592,13 +604,14 @@ def render_player_detail_page(
     default_line = float(st.session_state.get("individual_line", 19.5))
     default_over_odds = int(st.session_state.get("individual_over_odds", -110))
     default_under_odds = int(st.session_state.get("individual_under_odds", -110))
-    if prop_label in DK_MARKETS and sportsbook in SPORTSBOOKS:
+    market_was_loaded = False
+    if prop_label in SPORTSBOOK_PROP_MARKETS and sportsbook in SPORTSBOOKS:
         api_key = odds_api_key()
         if api_key:
             try:
                 player_markets = fetch_sportsbook_props(
                     api_key,
-                    DK_MARKETS[prop_label],
+                    SPORTSBOOK_PROP_MARKETS[prop_label],
                     SPORTSBOOKS[sportsbook],
                 )
                 if not player_markets.empty:
@@ -611,8 +624,16 @@ def render_player_detail_page(
                             default_line = float(current_market["Line"])
                             default_over_odds = int(current_market["Over Odds"])
                             default_under_odds = int(current_market["Under Odds"])
+                            market_was_loaded = True
             except (HTTPError, URLError, TimeoutError, KeyError, ValueError, TypeError):
                 pass
+    line_key = f"page_line_{sportsbook}_{prop_label}"
+    over_key = f"page_over_{sportsbook}_{prop_label}"
+    under_key = f"page_under_{sportsbook}_{prop_label}"
+    if market_was_loaded:
+        st.session_state[line_key] = default_line
+        st.session_state[over_key] = default_over_odds
+        st.session_state[under_key] = default_under_odds
     c5, c6, c7 = st.columns(3)
     with c5:
         line = st.number_input(
@@ -620,21 +641,21 @@ def render_player_detail_page(
             min_value=0.0,
             value=default_line,
             step=.5,
-            key=f"page_line_{sportsbook}_{prop_label}",
+            key=line_key,
         )
     with c6:
         over_odds = st.number_input(
             "Over odds",
             value=default_over_odds,
             step=5,
-            key=f"page_over_{sportsbook}_{prop_label}",
+            key=over_key,
         )
     with c7:
         under_odds = st.number_input(
             "Under odds",
             value=default_under_odds,
             step=5,
-            key=f"page_under_{sportsbook}_{prop_label}",
+            key=under_key,
         )
 
     stat = STAT_COLUMNS[prop_label]
