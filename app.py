@@ -40,11 +40,23 @@ DK_MARKETS = {
     "Assists": "player_assists",
 }
 DK_MARKET_LABELS = {value: key for key, value in DK_MARKETS.items()}
+WNBA_TEAM_ABBREVIATIONS = {
+    "Atlanta Dream": "ATL", "Chicago Sky": "CHI", "Connecticut Sun": "CON",
+    "Dallas Wings": "DAL", "Golden State Valkyries": "GSV", "Indiana Fever": "IND",
+    "Las Vegas Aces": "LVA", "Los Angeles Sparks": "LAS", "Minnesota Lynx": "MIN",
+    "New York Liberty": "NYL", "Phoenix Mercury": "PHX", "Seattle Storm": "SEA",
+    "Washington Mystics": "WAS",
+}
 
 
 def normalize_player_name(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def matchup_opponent(game: object, player_team: object) -> str:
+    teams = [WNBA_TEAM_ABBREVIATIONS.get(name.strip(), "") for name in str(game).split(" @ ")]
+    return next((team for team in teams if team and team != str(player_team)), "")
 
 
 def odds_api_key() -> str:
@@ -316,6 +328,7 @@ def prop_feed(
             continue
         values = games[STAT_COLUMNS[prop_label]]
         line = float(prop["Line"])
+        opponent = str(prop.get("Opponent", ""))
         rates = {}
         for window in (5, 10, 20):
             recent = values.tail(window)
@@ -326,19 +339,140 @@ def prop_feed(
         else:
             side = side_filter
         odds = int(prop.get(f"{side} Odds", -110))
+        h2h_values = games.loc[games["opponent"] == opponent, STAT_COLUMNS[prop_label]]
+        h2h_rate = hit_rate(h2h_values, line, side)
+        projection = (
+            .50 * float(values.tail(5).mean())
+            + .30 * float(values.tail(10).mean())
+            + .20 * float(values.tail(20).mean())
+        )
+        spread = max(float(values.tail(20).std(ddof=1)), .75) if len(values) > 1 else 1.0
+        over_probability = 1 - NormalDist(mu=projection, sigma=spread).cdf(line)
+        model_probability = over_probability if side == "Over" else 1 - over_probability
+        estimated_ev = model_probability * american_to_decimal(odds) - 1
         rows.append({
             "Player": prop["Player"], "Team": prop.get("Team", ""), "Prop": prop_label,
             "Pick": f"{side} {line:g}", "Odds": odds, "Line": line,
             "Over Odds": int(prop.get("Over Odds", -110)),
             "Under Odds": int(prop.get("Under Odds", -110)),
             "L5": rates[(side, 5)], "L10": rates[(side, 10)], "L20": rates[(side, 20)],
+            "H2H": h2h_rate, "H2H Games": int(len(h2h_values)),
             "Average": float(values.tail(rank_window).mean()),
-            "Game": prop.get("Game", ""), "Start Time": prop.get("Start Time", ""),
+            "EV+": "EV+" if estimated_ev > 0 else "—",
+            "Estimated EV": estimated_ev, "Fair Odds": fair_american(model_probability),
+            "Game": prop.get("Game", ""), "Opponent": opponent,
         })
     if not rows:
         return pd.DataFrame()
     rank_col = f"L{rank_window}"
     return pd.DataFrame(rows).sort_values([rank_col, "Average"], ascending=False).reset_index(drop=True)
+
+
+def render_player_detail_page(
+    logs: pd.DataFrame,
+    bankroll: float,
+    kelly_multiplier: float,
+    max_stake_pct: float,
+    min_ev: float,
+) -> None:
+    if st.button("← Back to Props", type="primary"):
+        st.session_state["app_view"] = "props"
+        st.rerun()
+
+    players = sorted(logs.player.astype(str).unique())
+    selected = st.session_state.get("individual_player_select", players[0])
+    if selected not in players:
+        selected = players[0]
+    player = st.selectbox("Player", players, index=players.index(selected), key="page_player")
+    games = logs[logs.player.astype(str) == player].sort_values("game_date").copy()
+    team = str(games.iloc[-1]["team"])
+
+    prop_options = list(STAT_COLUMNS)
+    selected_prop = st.session_state.get("individual_market_select", "Points")
+    if selected_prop not in prop_options:
+        selected_prop = "Points"
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        prop_label = st.selectbox("Prop", prop_options, index=prop_options.index(selected_prop), key="page_prop")
+    with c2:
+        line = st.number_input("DraftKings line", min_value=0.0, value=float(st.session_state.get("individual_line", 19.5)), step=.5, key="page_line")
+    with c3:
+        over_odds = st.number_input("Over odds", value=int(st.session_state.get("individual_over_odds", -110)), step=5, key="page_over")
+    with c4:
+        under_odds = st.number_input("Under odds", value=int(st.session_state.get("individual_under_odds", -110)), step=5, key="page_under")
+
+    opponents = sorted(games.opponent.astype(str).unique())
+    selected_opponent = st.session_state.get("selected_opponent", opponents[0])
+    if selected_opponent not in opponents:
+        selected_opponent = opponents[0]
+    opponent = st.selectbox("Matchup", opponents, index=opponents.index(selected_opponent), key="page_opponent")
+    window_label = st.radio(
+        "History", ["L5", "L10", "L20", "Season", "H2H"], horizontal=True, key="page_window"
+    )
+
+    stat = STAT_COLUMNS[prop_label]
+    values = games[stat]
+    if window_label == "Season":
+        view_games = games
+    elif window_label == "H2H":
+        view_games = games[games.opponent == opponent]
+    else:
+        view_games = games.tail(int(window_label[1:]))
+    view_values = view_games[stat]
+    projection, components = project_stat(games, stat, "H", opponent)
+    spread = max(float(values.tail(20).std(ddof=1)), .75) if len(values) > 1 else 1.0
+    model_over = 1 - NormalDist(mu=projection, sigma=spread).cdf(line)
+    model_under = 1 - model_over
+    over_ev = model_over * american_to_decimal(int(over_odds)) - 1
+    under_ev = model_under * american_to_decimal(int(under_odds)) - 1
+    best_side = "Over" if over_ev >= under_ev else "Under"
+    best_ev = max(over_ev, under_ev)
+    best_prob = model_over if best_side == "Over" else model_under
+    best_decimal = american_to_decimal(int(over_odds if best_side == "Over" else under_odds))
+    stake_pct = min(kelly_fraction(best_prob, best_decimal) * kelly_multiplier, max_stake_pct)
+
+    st.title(f"{player} ({team})")
+    st.caption(f"{prop_label} • {team} vs {opponent}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Projection", f"{projection:.1f}")
+    m2.metric("Selected average", "N/A" if view_values.empty else f"{view_values.mean():.1f}")
+    m3.metric("Over hit rate", "N/A" if view_values.empty else f"{hit_rate(view_values, line, 'Over'):.0%}")
+    m4.metric("Under hit rate", "N/A" if view_values.empty else f"{hit_rate(view_values, line, 'Under'):.0%}")
+
+    if best_ev > 0:
+        stake = bankroll * stake_pct if best_ev >= min_ev else 0.0
+        st.success(f"EV+ estimate: {best_side} {line:g} at {best_ev:+.1%} • fractional-Kelly stake ${stake:,.2f}")
+    else:
+        st.warning(f"No positive estimated value at the current prices. Best side: {best_side} {best_ev:+.1%}.")
+
+    chart = view_games.set_index("game_date")[[stat]].rename(columns={stat: prop_label})
+    chart["Prop line"] = line
+    st.subheader("Performance trend")
+    st.line_chart(chart)
+
+    split_rows = []
+    for label, subset in [
+        ("Last 5", games.tail(5)), ("Last 10", games.tail(10)), ("Last 20", games.tail(20)),
+        ("Season", games), (f"H2H vs {opponent}", games[games.opponent == opponent]),
+        ("Home", games[games.home_away == "H"]), ("Away", games[games.home_away == "A"]),
+    ]:
+        split_rows.append({
+            "Split": label, "Games": len(subset), "Average": subset[stat].mean(),
+            "Over": hit_rate(subset[stat], line, "Over"), "Under": hit_rate(subset[stat], line, "Under"),
+        })
+    st.subheader("Historical splits")
+    st.dataframe(
+        pd.DataFrame(split_rows), hide_index=True, use_container_width=True,
+        column_config={
+            "Average": st.column_config.NumberColumn(format="%.1f"),
+            "Over": st.column_config.NumberColumn(format="percent"),
+            "Under": st.column_config.NumberColumn(format="percent"),
+        },
+    )
+    st.subheader("Recent game logs")
+    cols = ["game_date", "opponent", "home_away", "minutes", "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers"]
+    st.dataframe(games.sort_values("game_date", ascending=False)[cols].head(20), hide_index=True, use_container_width=True)
+    st.caption("Projection components: " + ", ".join(components) + ". Research only; estimates are not guarantees.")
 
 
 st.title("🏀 WNBA Historical Prop Lab")
@@ -399,6 +533,10 @@ except Exception as exc:
         st.info("Try again shortly or choose 'Upload my CSV' as a fallback.")
     st.stop()
 
+if st.session_state.get("app_view") == "player":
+    render_player_detail_page(logs, bankroll, kelly_multiplier, max_stake_pct, min_ev)
+    st.stop()
+
 with st.expander("📊 All-Player Prop Trends", expanded=True):
     st.caption("Filter the DraftKings prop feed, compare L5/L10/L20 hit rates, and click a player for full details.")
     trend1, trend2, trend3 = st.columns(3)
@@ -450,6 +588,9 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                         lambda value: name_lookup.get(normalize_player_name(value), value)
                     )
                     board["Team"] = board["Player"].map(team_lookup).fillna("")
+                    board["Opponent"] = board.apply(
+                        lambda row: matchup_opponent(row.get("Game", ""), row.get("Team", "")), axis=1
+                    )
                     board = board.dropna(subset=["Over Odds", "Under Odds"])
                     category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
                     st.success(f"Loaded {len(board)} current DraftKings {category_text} props. Odds refresh every 15 minutes.")
@@ -525,7 +666,7 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             key=f"prop_rankings_{trend_stat_label}_{trend_window}_{side_filter}",
             column_order=[
                 "Rank", "Player", "Team", "Prop", "Pick", "Odds", "Game",
-                "Start Time", "L5", "L10", "L20", "Average",
+                "Average", "L5", "L10", "L20", "H2H",
             ],
             column_config={
                 "Rank": st.column_config.NumberColumn(format="%d"),
@@ -539,6 +680,10 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 ),
                 "L20": st.column_config.ProgressColumn(
                     format="percent", min_value=0.0, max_value=1.0
+                ),
+                "H2H": st.column_config.ProgressColumn(
+                    format="percent", min_value=0.0, max_value=1.0,
+                    help="Hit rate in previous games against today's opponent.",
                 ),
             },
         )
@@ -555,6 +700,40 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 st.session_state["individual_line"] = float(selected_prop["Line"])
                 st.session_state["individual_over_odds"] = int(selected_prop["Over Odds"])
                 st.session_state["individual_under_odds"] = int(selected_prop["Under Odds"])
+                st.session_state["selected_opponent"] = selected_prop.get("Opponent", "")
+                st.session_state["app_view"] = "player"
+                st.rerun()
+
+        st.subheader("EV+ Betting Candidates")
+        st.caption(
+            "Estimated from the historical projection and current DraftKings price. "
+            "EV+ is a research signal, not a guarantee of profit."
+        )
+        ev_table = trend_table[trend_table["Estimated EV"] > 0].sort_values(
+            "Estimated EV", ascending=False
+        )
+        if ev_table.empty:
+            st.info("No displayed props currently have positive estimated value.")
+        else:
+            st.dataframe(
+                ev_table,
+                use_container_width=True,
+                hide_index=True,
+                column_order=[
+                    "EV+", "Player", "Team", "Prop", "Pick", "Odds",
+                    "Estimated EV", "Fair Odds", "Average", "L5", "L10", "L20", "H2H",
+                ],
+                column_config={
+                    "Estimated EV": st.column_config.ProgressColumn(
+                        format="percent", min_value=0.0, max_value=max(.01, float(ev_table["Estimated EV"].max()))
+                    ),
+                    "Average": st.column_config.NumberColumn(format="%.1f"),
+                    "L5": st.column_config.NumberColumn(format="percent"),
+                    "L10": st.column_config.NumberColumn(format="percent"),
+                    "L20": st.column_config.NumberColumn(format="percent"),
+                    "H2H": st.column_config.NumberColumn(format="percent"),
+                },
+            )
         st.download_button(
             "Download trend results",
             trend_table.to_csv(index=False),
