@@ -13,6 +13,7 @@ from urllib.request import urlopen
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(page_title="WNBA Prop Lab", page_icon="🏀", layout="wide")
@@ -394,30 +395,13 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
             "Average", "L5", "L10", "L20", "H2H",
         ]
     percent_columns = {"L5", "L10", "L20", "H2H", "Estimated EV"}
-    sort_columns = {
-        "Player": "Player", "Team": "Team", "Prop": "Prop", "Line": "Line",
-        "Pick": "Pick", "Odds": "Odds", "VS": "Opponent", "Average": "Average",
-        "L5": "L5", "L10": "L10", "L20": "L20", "H2H": "H2H",
-        "EV+": "Estimated EV", "Estimated EV": "Estimated EV", "Fair Odds": "Fair Odds",
-    }
-    active_sort_label = str(st.query_params.get("sort", ""))
-    active_direction = str(st.query_params.get("direction", "desc"))
-    active_sort_column = sort_columns.get(active_sort_label)
-    if active_sort_column in df.columns:
-        df = df.sort_values(active_sort_column, ascending=active_direction == "asc", na_position="last")
-
+    table_id = "ev-prop-table" if ev_only else "main-prop-table"
     header_cells = []
-    for column in columns:
-        if column in sort_columns:
-            next_direction = "asc" if active_sort_label == column and active_direction == "desc" else "desc"
-            arrow = " ▲" if active_sort_label == column and active_direction == "asc" else " ▼" if active_sort_label == column else ""
-            sort_url = APP_URL + "?" + urlencode({"sort": column, "direction": next_direction})
-            header_cells.append(
-                f'<th><a class="prop-sort-link" href="{html.escape(sort_url, quote=True)}" target="_self">'
-                f'{html.escape(column)}{arrow}</a></th>'
-            )
-        else:
-            header_cells.append(f"<th>{html.escape(column)}</th>")
+    for index, column in enumerate(columns):
+        header_cells.append(
+            f'<th><button class="prop-sort-link" onclick="sortPropTable(\'{table_id}\',{index},this)">'
+            f'{html.escape(column)}<span class="sort-arrow"></span></button></th>'
+        )
     header = "".join(header_cells)
     body_rows = []
     for _, row in df.iterrows():
@@ -426,11 +410,14 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
             if column == "Player":
                 url = html.escape(str(row.get("Player Link", "")), quote=True)
                 name = html.escape(str(row.get("Player", "")))
-                value = f'<a class="prop-player-link" href="{url}" target="_self">{name}</a>'
+                raw_sort = str(row.get("Player", ""))
+                value = f'<a class="prop-player-link" href="{url}" target="_parent">{name}</a>'
             elif column == "VS":
+                raw_sort = str(row.get("Opponent", ""))
                 value = html.escape(str(row.get("Opponent", "")))
             elif column in percent_columns:
                 raw = row.get(column, np.nan)
+                raw_sort = "" if pd.isna(raw) else str(float(raw))
                 if pd.isna(raw):
                     value = "—"
                 else:
@@ -442,15 +429,18 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
                         f'<b>{pct:.0f}%</b></div>'
                     )
             elif column in {"Line", "Average"}:
+                raw_sort = str(float(row.get(column, 0)))
                 value = f"{float(row.get(column, 0)):.1f}"
             else:
+                raw_sort = str(row.get(column, ""))
                 value = html.escape(str(row.get(column, "")))
-            cells.append(f"<td>{value}</td>")
+            cells.append(f'<td data-sort="{html.escape(raw_sort, quote=True)}">{value}</td>')
         body_rows.append("<tr>" + "".join(cells) + "</tr>")
 
-    st.markdown(
+    table_html = (
         """
-        <style>
+        <html><head><meta name="color-scheme" content="dark"><style>
+        html, body {margin:0; padding:0; background:#0e1117; color:#f3f5f7; font-family:Arial,sans-serif;}
         .prop-table-wrap {overflow-x:auto; border:1px solid #343943; border-radius:10px;}
         .prop-table {width:100%; border-collapse:collapse; white-space:nowrap; font-size:.9rem;}
         .prop-table th {background:#171a20; color:#d9dee7; text-align:left; padding:10px; position:sticky; top:0;}
@@ -458,20 +448,43 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
         .prop-table tr:hover td {background:#20252c;}
         .prop-player-link, .prop-player-link:visited {color:#ffffff !important; font-weight:700; text-decoration:none !important;}
         .prop-player-link:hover {color:#71ff9a !important; text-decoration:none !important;}
-        .prop-sort-link, .prop-sort-link:visited {color:#d9dee7 !important; font-weight:700; text-decoration:none !important;}
-        .prop-sort-link:hover {color:#71ff9a !important; text-decoration:none !important;}
+        .prop-sort-link {color:#d9dee7; font-weight:700; text-decoration:none; border:0; background:transparent; padding:0; cursor:pointer; font-size:inherit; white-space:nowrap;}
+        .prop-sort-link:hover {color:#71ff9a;}
+        .sort-arrow {color:#71ff9a; margin-left:4px;}
         .prop-percent {display:flex; align-items:center; gap:8px; min-width:110px; color:#71ff9a;}
         .prop-bar {width:72px; height:8px; overflow:hidden; border-radius:10px; background:#30363d;}
         .prop-bar span {display:block; height:100%; border-radius:10px; background:#39ff7a; box-shadow:0 0 8px #39ff7a;}
-        </style>
+        </style></head><body>
         """
-        + '<div class="prop-table-wrap"><table class="prop-table"><thead><tr>'
+        + f'<div class="prop-table-wrap"><table id="{table_id}" class="prop-table"><thead><tr>'
         + header
         + "</tr></thead><tbody>"
         + "".join(body_rows)
-        + "</tbody></table></div>",
-        unsafe_allow_html=True,
+        + """</tbody></table></div>
+        <script>
+        const propDirections = {};
+        function sortPropTable(tableId, columnIndex, button) {
+          const table = document.getElementById(tableId);
+          const tbody = table.tBodies[0];
+          const key = tableId + ':' + columnIndex;
+          const ascending = !(propDirections[key] === true);
+          propDirections[key] = ascending;
+          const rows = Array.from(tbody.rows);
+          rows.sort((a, b) => {
+            const av = a.cells[columnIndex].dataset.sort || '';
+            const bv = b.cells[columnIndex].dataset.sort || '';
+            const an = Number(av), bn = Number(bv);
+            const bothNumeric = av !== '' && bv !== '' && !Number.isNaN(an) && !Number.isNaN(bn);
+            const result = bothNumeric ? an - bn : av.localeCompare(bv, undefined, {numeric:true, sensitivity:'base'});
+            return ascending ? result : -result;
+          });
+          rows.forEach(row => tbody.appendChild(row));
+          table.querySelectorAll('.sort-arrow').forEach(el => el.textContent = '');
+          button.querySelector('.sort-arrow').textContent = ascending ? '▲' : '▼';
+        }
+        </script></body></html>"""
     )
+    components.html(table_html, height=min(650, 55 + len(df) * 43), scrolling=True)
 
 
 def render_player_detail_page(
