@@ -34,6 +34,7 @@ BASE_REQUIRED = {
     "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers",
 }
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+APP_URL = "https://edgeback-app-gnvtxztutnsbhmjp5cftvg.streamlit.app/"
 DK_MARKETS = {
     "Points": "player_points",
     "Rebounds": "player_rebounds",
@@ -355,8 +356,14 @@ def prop_feed(
         over_probability = 1 - NormalDist(mu=projection, sigma=spread).cdf(line)
         model_probability = over_probability if side == "Over" else 1 - over_probability
         estimated_ev = model_probability * american_to_decimal(odds) - 1
+        player_link = APP_URL + "?" + urlencode({
+            "player": str(prop["Player"]), "prop": prop_label, "line": line,
+            "over": int(prop.get("Over Odds", -110)), "under": int(prop.get("Under Odds", -110)),
+            "opponent": opponent,
+        }) + f"#{prop['Player']}"
         rows.append({
             "Player": prop["Player"], "Team": prop.get("Team", ""), "Prop": prop_label,
+            "Player Link": player_link,
             "Pick": f"{side} {line:g}", "Odds": odds, "Line": line,
             "Over Odds": int(prop.get("Over Odds", -110)),
             "Under Odds": int(prop.get("Under Odds", -110)),
@@ -382,6 +389,7 @@ def render_player_detail_page(
 ) -> None:
     if st.button("← Back to Props", type="primary"):
         st.session_state["app_view"] = "props"
+        st.query_params.clear()
         st.rerun()
 
     players = sorted(logs.player.astype(str).unique())
@@ -537,6 +545,19 @@ except Exception as exc:
         st.info("Try again shortly or choose 'Upload my CSV' as a fallback.")
     st.stop()
 
+linked_player = st.query_params.get("player")
+if linked_player:
+    st.session_state["individual_player_select"] = linked_player
+    st.session_state["individual_market_select"] = st.query_params.get("prop", "Points")
+    try:
+        st.session_state["individual_line"] = float(st.query_params.get("line", 19.5))
+        st.session_state["individual_over_odds"] = int(st.query_params.get("over", -110))
+        st.session_state["individual_under_odds"] = int(st.query_params.get("under", -110))
+    except (TypeError, ValueError):
+        pass
+    st.session_state["selected_opponent"] = st.query_params.get("opponent", "")
+    st.session_state["app_view"] = "player"
+
 if st.session_state.get("app_view") == "player":
     render_player_detail_page(logs, bankroll, kelly_multiplier, max_stake_pct, min_ev)
     st.stop()
@@ -654,21 +675,20 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
     if trend_table.empty:
         st.info("Enter at least one prop line above to generate the all-player hit-rate table.")
     else:
-        trend_table.insert(0, "Rank", np.arange(1, len(trend_table) + 1))
-        st.caption("Click any player row to open that player's separate analysis page.")
-        ranking_event = st.dataframe(
+        st.caption("Click a player name to open that player's separate analysis page.")
+        st.dataframe(
             trend_table,
             use_container_width=True,
             hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
             key=f"prop_rankings_{trend_stat_label}_{trend_window}_{side_filter}",
             column_order=[
-                "Rank", "Player", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
+                "Player Link", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
                 "Average", "L5", "L10", "L20", "H2H",
             ],
             column_config={
-                "Rank": st.column_config.NumberColumn(format="%d"),
+                "Player Link": st.column_config.LinkColumn(
+                    "Player", display_text=r"#(.*)$", help="Click to open player analysis"
+                ),
                 "Line": st.column_config.NumberColumn(format="%.1f"),
                 "Opponent": st.column_config.TextColumn("VS"),
                 "Average": st.column_config.NumberColumn(format="%.1f"),
@@ -687,22 +707,6 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 ),
             },
         )
-        if ranking_event.selection.rows:
-            selected_prop = trend_table.iloc[ranking_event.selection.rows[0]]
-            selection_token = (
-                selected_prop["Player"], selected_prop["Prop"], float(selected_prop["Line"]),
-                int(selected_prop["Over Odds"]), int(selected_prop["Under Odds"]),
-            )
-            if st.session_state.get("prop_selection_token") != selection_token:
-                st.session_state["prop_selection_token"] = selection_token
-                st.session_state["individual_player_select"] = selected_prop["Player"]
-                st.session_state["individual_market_select"] = selected_prop["Prop"]
-                st.session_state["individual_line"] = float(selected_prop["Line"])
-                st.session_state["individual_over_odds"] = int(selected_prop["Over Odds"])
-                st.session_state["individual_under_odds"] = int(selected_prop["Under Odds"])
-                st.session_state["selected_opponent"] = selected_prop.get("Opponent", "")
-                st.session_state["app_view"] = "player"
-                st.rerun()
 
         st.subheader("EV+ Betting Candidates")
         st.caption(
@@ -720,10 +724,13 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 use_container_width=True,
                 hide_index=True,
                 column_order=[
-                    "EV+", "Player", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
+                    "EV+", "Player Link", "Team", "Prop", "Line", "Pick", "Odds", "Opponent",
                     "Estimated EV", "Fair Odds", "Average", "L5", "L10", "L20", "H2H",
                 ],
                 column_config={
+                    "Player Link": st.column_config.LinkColumn(
+                        "Player", display_text=r"#(.*)$", help="Click to open player analysis"
+                    ),
                     "Line": st.column_config.NumberColumn(format="%.1f"),
                     "Opponent": st.column_config.TextColumn("VS"),
                     "Estimated EV": st.column_config.ProgressColumn(
