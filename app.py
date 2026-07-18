@@ -587,16 +587,55 @@ def render_player_detail_page(
     selected_opponent = st.session_state.get("selected_opponent", opponents[0])
     if selected_opponent not in opponents:
         selected_opponent = opponents[0]
+    opponent = selected_opponent
     sportsbook = str(st.session_state.get("selected_sportsbook", "DraftKings"))
-    c4, c5, c6, c7 = st.columns(4)
-    with c4:
-        opponent = st.selectbox("Matchup", opponents, index=opponents.index(selected_opponent), key="page_opponent")
+    default_line = float(st.session_state.get("individual_line", 19.5))
+    default_over_odds = int(st.session_state.get("individual_over_odds", -110))
+    default_under_odds = int(st.session_state.get("individual_under_odds", -110))
+    if prop_label in DK_MARKETS and sportsbook in SPORTSBOOKS:
+        api_key = odds_api_key()
+        if api_key:
+            try:
+                player_markets = fetch_sportsbook_props(
+                    api_key,
+                    DK_MARKETS[prop_label],
+                    SPORTSBOOKS[sportsbook],
+                )
+                if not player_markets.empty:
+                    matching_market = player_markets[
+                        player_markets["Player"].map(normalize_player_name) == normalize_player_name(player)
+                    ]
+                    if not matching_market.empty:
+                        current_market = matching_market.iloc[0]
+                        if current_market[["Line", "Over Odds", "Under Odds"]].notna().all():
+                            default_line = float(current_market["Line"])
+                            default_over_odds = int(current_market["Over Odds"])
+                            default_under_odds = int(current_market["Under Odds"])
+            except (HTTPError, URLError, TimeoutError, KeyError, ValueError, TypeError):
+                pass
+    c5, c6, c7 = st.columns(3)
     with c5:
-        line = st.number_input(f"{sportsbook} line", min_value=0.0, value=float(st.session_state.get("individual_line", 19.5)), step=.5, key="page_line")
+        line = st.number_input(
+            f"{sportsbook} line",
+            min_value=0.0,
+            value=default_line,
+            step=.5,
+            key=f"page_line_{sportsbook}_{prop_label}",
+        )
     with c6:
-        over_odds = st.number_input("Over odds", value=int(st.session_state.get("individual_over_odds", -110)), step=5, key="page_over")
+        over_odds = st.number_input(
+            "Over odds",
+            value=default_over_odds,
+            step=5,
+            key=f"page_over_{sportsbook}_{prop_label}",
+        )
     with c7:
-        under_odds = st.number_input("Under odds", value=int(st.session_state.get("individual_under_odds", -110)), step=5, key="page_under")
+        under_odds = st.number_input(
+            "Under odds",
+            value=default_under_odds,
+            step=5,
+            key=f"page_under_{sportsbook}_{prop_label}",
+        )
 
     stat = STAT_COLUMNS[prop_label]
     values = games[stat]
