@@ -72,6 +72,16 @@ def matchup_opponent(game: object, player_team: object) -> str:
     return next((team for team in teams if team and team != normalized_player_team), "")
 
 
+def matchup_label(game: object) -> str:
+    """Display an Odds API matchup as compact team abbreviations."""
+    teams = [
+        WNBA_TEAM_ABBREVIATIONS.get(name.strip(), name.strip())
+        for name in str(game).split(" @ ")
+        if name.strip()
+    ]
+    return " vs ".join(teams) if len(teams) == 2 else str(game)
+
+
 def odds_api_key() -> str:
     try:
         return str(st.secrets.get("THE_ODDS_API_KEY", "")).strip()
@@ -696,111 +706,78 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             team for team in logs["team"].dropna().astype(str).unique() if team
         )
         selected_team = st.selectbox("Team", team_options)
+        game_filter_slot = st.empty()
     with trend3:
         side_filter = st.radio("Side", ["Best side", "Over", "Under"], horizontal=True)
 
     prop_template = make_prop_board(logs, [])
     odds_source = st.radio(
         "Sportsbook odds source",
-        ["DraftKings", "FanDuel", "BetOnline", "Enter or upload manually"],
+        ["DraftKings", "FanDuel", "BetOnline"],
         horizontal=True,
     )
     board = pd.DataFrame()
-    selected_sportsbook = odds_source if odds_source in SPORTSBOOKS else "Manual"
-    if odds_source in SPORTSBOOKS:
-        api_key = odds_api_key()
-        if not api_key:
-            st.warning("Sportsbook odds need a private Odds API key. Add it in Manage app → Settings → Secrets.")
-            with st.expander("One-time API-key setup"):
-                st.markdown(
-                    "1. Create a key at [The Odds API](https://the-odds-api.com/).\n"
-                    "2. Open **Manage app → Settings → Secrets**.\n"
-                    "3. Add the line below, replacing the sample text with your key.\n"
-                    "4. Save the secret and restart the app."
-                )
-                st.code('THE_ODDS_API_KEY = "paste-your-key-here"')
-        else:
-            try:
-                with st.spinner(f"Loading current {odds_source} player props…"):
-                    requested_markets = (
-                        ",".join(DK_MARKETS.values())
-                        if trend_stat_label == "All Props"
-                        else DK_MARKETS[trend_stat_label]
-                    )
-                    board = fetch_sportsbook_props(
-                        api_key,
-                        requested_markets,
-                        SPORTSBOOKS[odds_source],
-                    )
-                if board.empty:
-                    st.info(f"{odds_source} has no WNBA props posted for this market right now. Try again closer to game time.")
-                else:
-                    latest_players = logs.sort_values("game_date").groupby("player", as_index=False).tail(1)
-                    name_lookup = dict(zip(latest_players["player"].map(normalize_player_name), latest_players["player"]))
-                    team_lookup = dict(zip(latest_players["player"], latest_players["team"]))
-                    board["Sportsbook Player"] = board["Player"]
-                    board["Player"] = board["Player"].map(
-                        lambda value: name_lookup.get(normalize_player_name(value), value)
-                    )
-                    board["Team"] = board["Player"].map(team_lookup).fillna("")
-                    board["Sportsbook"] = odds_source
-                    board["Opponent"] = board.apply(
-                        lambda row: matchup_opponent(row.get("Game", ""), row.get("Team", "")), axis=1
-                    )
-                    board = board.dropna(subset=["Over Odds", "Under Odds"])
-                    category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
-                    st.success(f"Loaded {len(board)} current {odds_source} {category_text} props. Odds refresh every 15 minutes.")
-            except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
-                st.error(f"Could not load {odds_source} odds: {exc}")
-                st.info("Check the API key and account quota, or use manual entry below.")
-    else:
-        upload_board = st.file_uploader(
-            "Optional: upload a prop board CSV",
-            type="csv",
-            key="prop_board_upload",
-            help="Columns: Player, Team, Line, Over Odds, Under Odds",
-        )
-        st.download_button(
-            "Download prop-board template",
-            prop_template.to_csv(index=False),
-            "wnba_prop_board.csv",
-            "text/csv",
-        )
-
-        if upload_board is not None:
-            try:
-                board = pd.read_csv(upload_board)
-                needed = {"Player", "Line", "Over Odds", "Under Odds"}
-                missing = needed - set(board.columns)
-                if missing:
-                    raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
-                if "Team" not in board:
-                    board["Team"] = ""
-                board["Sportsbook"] = "Manual"
-            except Exception as exc:
-                st.error(f"Could not load prop board: {exc}")
-                board = prop_template
-        else:
-            st.caption("Enter lines and odds directly below. Leave players without a current prop blank.")
-            board = st.data_editor(
-                prop_template,
-                hide_index=True,
-                use_container_width=True,
-                num_rows="fixed",
-                key="prop_editor_all_players",
-                column_config={
-                    "Player": st.column_config.TextColumn(disabled=True),
-                    "Team": st.column_config.TextColumn(disabled=True),
-                    "Line": st.column_config.NumberColumn(min_value=0.0, step=.5),
-                    "Over Odds": st.column_config.NumberColumn(step=5),
-                    "Under Odds": st.column_config.NumberColumn(step=5),
-                },
+    selected_sportsbook = odds_source
+    api_key = odds_api_key()
+    if not api_key:
+        st.warning("Sportsbook odds need a private Odds API key. Add it in Manage app → Settings → Secrets.")
+        with st.expander("One-time API-key setup"):
+            st.markdown(
+                "1. Create a key at [The Odds API](https://the-odds-api.com/).\n"
+                "2. Open **Manage app → Settings → Secrets**.\n"
+                "3. Add the line below, replacing the sample text with your key.\n"
+                "4. Save the secret and restart the app."
             )
+            st.code('THE_ODDS_API_KEY = "paste-your-key-here"')
+    else:
+        try:
+            with st.spinner(f"Loading current {odds_source} player props…"):
+                requested_markets = (
+                    ",".join(DK_MARKETS.values())
+                    if trend_stat_label == "All Props"
+                    else DK_MARKETS[trend_stat_label]
+                )
+                board = fetch_sportsbook_props(
+                    api_key,
+                    requested_markets,
+                    SPORTSBOOKS[odds_source],
+                )
+            if board.empty:
+                st.info(f"{odds_source} has no WNBA props posted for this market right now. Try again closer to game time.")
+            else:
+                latest_players = logs.sort_values("game_date").groupby("player", as_index=False).tail(1)
+                name_lookup = dict(zip(latest_players["player"].map(normalize_player_name), latest_players["player"]))
+                team_lookup = dict(zip(latest_players["player"], latest_players["team"]))
+                board["Sportsbook Player"] = board["Player"]
+                board["Player"] = board["Player"].map(
+                    lambda value: name_lookup.get(normalize_player_name(value), value)
+                )
+                board["Team"] = board["Player"].map(team_lookup).fillna("")
+                board["Sportsbook"] = odds_source
+                board["Opponent"] = board.apply(
+                    lambda row: matchup_opponent(row.get("Game", ""), row.get("Team", "")), axis=1
+                )
+                board = board.dropna(subset=["Over Odds", "Under Odds"])
+                category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
+                st.success(f"Loaded {len(board)} current {odds_source} {category_text} props. Odds refresh every 15 minutes.")
+        except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
+            st.error(f"Could not load {odds_source} odds: {exc}")
+            st.info("Check the API key and account quota, then try again.")
 
     if board.empty:
         board = prop_template.iloc[0:0]
-    elif selected_team != "All Teams":
-        board = board[board["Team"].astype(str) == selected_team].copy()
+    team_board = board
+    if selected_team != "All Teams":
+        team_board = board[board["Team"].astype(str) == selected_team].copy()
+    game_options = ["All Games"] + sorted(team_board.get("Game", pd.Series(dtype=str)).dropna().astype(str).unique())
+    selected_game = game_filter_slot.selectbox(
+        "Game",
+        game_options,
+        format_func=lambda value: value if value == "All Games" else matchup_label(value),
+    )
+    board = team_board
+    if selected_game != "All Games":
+        board = board[board["Game"].astype(str) == selected_game].copy()
 
     fallback_prop = "Points" if trend_stat_label == "All Props" else trend_stat_label
     trend_stat = STAT_COLUMNS[fallback_prop]
