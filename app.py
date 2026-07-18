@@ -394,7 +394,31 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
             "Average", "L5", "L10", "L20", "H2H",
         ]
     percent_columns = {"L5", "L10", "L20", "H2H", "Estimated EV"}
-    header = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
+    sort_columns = {
+        "Player": "Player", "Team": "Team", "Prop": "Prop", "Line": "Line",
+        "Pick": "Pick", "Odds": "Odds", "VS": "Opponent", "Average": "Average",
+        "L5": "L5", "L10": "L10", "L20": "L20", "H2H": "H2H",
+        "EV+": "Estimated EV", "Estimated EV": "Estimated EV", "Fair Odds": "Fair Odds",
+    }
+    active_sort_label = str(st.query_params.get("sort", ""))
+    active_direction = str(st.query_params.get("direction", "desc"))
+    active_sort_column = sort_columns.get(active_sort_label)
+    if active_sort_column in df.columns:
+        df = df.sort_values(active_sort_column, ascending=active_direction == "asc", na_position="last")
+
+    header_cells = []
+    for column in columns:
+        if column in sort_columns:
+            next_direction = "asc" if active_sort_label == column and active_direction == "desc" else "desc"
+            arrow = " ▲" if active_sort_label == column and active_direction == "asc" else " ▼" if active_sort_label == column else ""
+            sort_url = APP_URL + "?" + urlencode({"sort": column, "direction": next_direction})
+            header_cells.append(
+                f'<th><a class="prop-sort-link" href="{html.escape(sort_url, quote=True)}" target="_self">'
+                f'{html.escape(column)}{arrow}</a></th>'
+            )
+        else:
+            header_cells.append(f"<th>{html.escape(column)}</th>")
+    header = "".join(header_cells)
     body_rows = []
     for _, row in df.iterrows():
         cells = []
@@ -432,8 +456,10 @@ def render_prop_table(df: pd.DataFrame, ev_only: bool = False) -> None:
         .prop-table th {background:#171a20; color:#d9dee7; text-align:left; padding:10px; position:sticky; top:0;}
         .prop-table td {padding:9px 10px; border-top:1px solid #30343d; color:#f3f5f7;}
         .prop-table tr:hover td {background:#20252c;}
-        .prop-player-link, .prop-player-link:visited {color:#ffffff !important; font-weight:700; text-decoration:underline;}
-        .prop-player-link:hover {color:#71ff9a !important;}
+        .prop-player-link, .prop-player-link:visited {color:#ffffff !important; font-weight:700; text-decoration:none !important;}
+        .prop-player-link:hover {color:#71ff9a !important; text-decoration:none !important;}
+        .prop-sort-link, .prop-sort-link:visited {color:#d9dee7 !important; font-weight:700; text-decoration:none !important;}
+        .prop-sort-link:hover {color:#71ff9a !important; text-decoration:none !important;}
         .prop-percent {display:flex; align-items:center; gap:8px; min-width:110px; color:#71ff9a;}
         .prop-bar {width:72px; height:8px; overflow:hidden; border-radius:10px; background:#30363d;}
         .prop-bar span {display:block; height:100%; border-radius:10px; background:#39ff7a; box-shadow:0 0 8px #39ff7a;}
