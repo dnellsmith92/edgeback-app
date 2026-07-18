@@ -128,6 +128,7 @@ def parse_sportsbook_props(
                     continue
                 key = (str(payload.get("id", "")), str(market_key), player, float(point))
                 row = rows.setdefault(key, {
+                    "Event ID": str(payload.get("id", "")),
                     "Player": player, "Prop": DK_MARKET_LABELS.get(str(market_key), str(market_key)),
                     "Line": float(point), "Over Odds": np.nan,
                     "Under Odds": np.nan, "Game": game,
@@ -138,7 +139,7 @@ def parse_sportsbook_props(
     return list(rows.values())
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_sportsbook_props(
     api_key: str,
     market_keys_csv: str,
@@ -161,7 +162,29 @@ def fetch_sportsbook_props(
             },
         )
         rows.extend(parse_sportsbook_props(payload, market_keys, bookmaker_key))
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    complete = frame.dropna(subset=["Over Odds", "Under Odds"]).copy()
+    if complete.empty:
+        return frame
+    complete["_updated"] = pd.to_datetime(complete["Last Update"], errors="coerce", utc=True)
+    complete["_balance"] = complete.apply(
+        lambda row: abs(
+            american_implied(int(row["Over Odds"]))
+            - american_implied(int(row["Under Odds"]))
+        ),
+        axis=1,
+    )
+    complete = complete.sort_values(
+        ["_updated", "_balance"],
+        ascending=[False, True],
+        na_position="last",
+    )
+    return complete.drop_duplicates(
+        subset=["Event ID", "Prop", "Player"],
+        keep="first",
+    ).drop(columns=["_updated", "_balance"]).reset_index(drop=True)
 
 
 def american_to_decimal(odds: int) -> float:
@@ -604,7 +627,6 @@ def render_player_detail_page(
     default_line = float(st.session_state.get("individual_line", 19.5))
     default_over_odds = int(st.session_state.get("individual_over_odds", -110))
     default_under_odds = int(st.session_state.get("individual_under_odds", -110))
-    market_was_loaded = False
     if prop_label in SPORTSBOOK_PROP_MARKETS and sportsbook in SPORTSBOOKS:
         api_key = odds_api_key()
         if api_key:
@@ -624,20 +646,15 @@ def render_player_detail_page(
                             default_line = float(current_market["Line"])
                             default_over_odds = int(current_market["Over Odds"])
                             default_under_odds = int(current_market["Under Odds"])
-                            market_was_loaded = True
             except (HTTPError, URLError, TimeoutError, KeyError, ValueError, TypeError):
                 pass
-    line_key = f"page_line_{sportsbook}_{prop_label}"
-    over_key = f"page_over_{sportsbook}_{prop_label}"
-    under_key = f"page_under_{sportsbook}_{prop_label}"
-    if market_was_loaded:
-        st.session_state[line_key] = default_line
-        st.session_state[over_key] = default_over_odds
-        st.session_state[under_key] = default_under_odds
+    line_key = f"page_line_adjustable_{sportsbook}_{prop_label}"
+    over_key = f"page_over_adjustable_{sportsbook}_{prop_label}"
+    under_key = f"page_under_adjustable_{sportsbook}_{prop_label}"
     c5, c6, c7 = st.columns(3)
     with c5:
         line = st.number_input(
-            f"{sportsbook} line",
+            "Line",
             min_value=0.0,
             value=default_line,
             step=.5,
@@ -852,6 +869,9 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
             "Sportsbook odds source",
             ["DraftKings", "FanDuel", "BetOnline"],
         )
+        if st.button("Refresh odds now", use_container_width=True):
+            fetch_sportsbook_props.clear()
+            st.rerun()
     with trend2:
         team_options = ["All Teams"] + sorted(
             team for team in logs["team"].dropna().astype(str).unique() if team
@@ -905,7 +925,16 @@ with st.expander("📊 All-Player Prop Trends", expanded=True):
                 )
                 board = board.dropna(subset=["Over Odds", "Under Odds"])
                 category_text = "player" if trend_stat_label == "All Props" else trend_stat_label.lower()
-                st.success(f"Loaded {len(board)} current {odds_source} {category_text} props. Odds refresh every 15 minutes.")
+                latest_update = pd.to_datetime(board["Last Update"], errors="coerce", utc=True).max()
+                update_text = (
+                    ""
+                    if pd.isna(latest_update)
+                    else f" Provider update: {latest_update.strftime('%Y-%m-%d %H:%M UTC')}."
+                )
+                st.success(
+                    f"Loaded {len(board)} current {odds_source} {category_text} props."
+                    f"{update_text} Odds cache refreshes every minute."
+                )
         except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
             st.error(f"Could not load {odds_source} odds: {exc}")
             st.info("Check the API key and account quota, then try again.")
